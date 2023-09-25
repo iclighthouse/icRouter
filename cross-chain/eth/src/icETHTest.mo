@@ -34,7 +34,7 @@ import DRC202 "./lib/icl/DRC202";
 import ICPubSub "./lib/icl/ICPubSub";
 import DIP20 "./lib/icl/DIP20";
 import ICRC1 "./lib/icl/ICRC1";
-import DRC204 "./lib/icl/DRC204";
+// import DRC204 "./lib/icl/DRC204";
 import DRC207 "./lib/icl/DRC207";
 
 //record { totalSupply=0; decimals=18; fee=100000000000; name=opt "icETH (Test)"; symbol=opt "icETHTest"; metadata=null; founder=null;}  
@@ -246,6 +246,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
             balances := Trie.put(balances, keyb(_a), Blob.equal, _v).0;
             if (_v < fee_ / 2){
                 balances := Trie.remove(balances, keyb(_a), Blob.equal).0;
+                totalSupply_ -= _v;
             };
         };
         _pushTop100(_a, _getBalance(_a));
@@ -349,7 +350,11 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
         if(fee_ > 0) {
             let fee = fee_ * _percent / 100;
             if (_getBalance(_caller) >= fee){
-                ignore _send(_caller, FEE_TO, fee, false);
+                if (FEE_TO == AID.blackhole()){
+                    ignore _burn(_caller, fee, false);
+                }else{
+                    ignore _send(_caller, FEE_TO, fee, false);
+                };
                 return true;
             } else {
                 return false;
@@ -1710,12 +1715,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     //     let icdex_pair = await DRC204.icdex_create();
     //     return icdex_pair;
     // };
-    public shared func drc204_pairs() : async [(Principal, (DRC204.SwapPair, Nat))]{
-        return await DRC204.getPairs(Principal.fromActor(this));
-    };
-    public query func drc204_router(): async Principal{
-        return Principal.fromText(DRC204.router);
-    };
+    // public shared func drc204_pairs() : async [(Principal, (DRC204.SwapPair, Nat))]{
+    //     return await DRC204.getPairs(Principal.fromActor(this));
+    // };
+    // public query func drc204_router(): async Principal{
+    //     return Principal.fromText(DRC204.router);
+    // };
 
     /* 
     * Genesis

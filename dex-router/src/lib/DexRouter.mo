@@ -33,16 +33,9 @@ module {
     public type PairResponse = { 
         pair:SwapPair; 
         score:Nat; 
-        liquidity: ?ICDex.Liquidity; 
-        sponsored: Bool; 
-        listingReferrers: [(ListingReferrer, Time.Time)];
-    };
-    public type PairResponse2 = { 
-        pair:SwapPair; 
-        score:Nat; 
         liquidity: ?ICDex.Liquidity2; 
         sponsored: Bool; 
-        listingReferrers: [(ListingReferrer, Time.Time)];
+        listingReferrers: [(ListingReferrer, Time.Time, Text)];
     };
     public type Txid = Blob;
     public type AccountId = Blob;
@@ -125,9 +118,10 @@ module {
         removeByDex : shared (_pairCanister: Principal) -> async ();
         pushCompetitionByPair : shared (_round: Nat, _name: Text, _start: Time.Time, _end: Time.Time) -> async ();
         pushCompetitionByDex : shared (_id: ?Nat, _name: Text, _content: Text, _start: Time.Time, _end: Time.Time, pairs: [(DexName, Principal, {#token0; #token1})]) -> async Nat;
-        setListingReferrer : shared (_referrer: Principal, _name: Text, _verified: Bool, _nftId: ?Text, _collection: ?Text) -> async ();
+        verifyListingReferrer : shared (_referrer: Principal, _name: Text, _verified: Bool) -> async ();
+        setListingReferrerByNft : shared (_name: Text, _nftId: Text) -> async ();
         propose : shared (_pair: SwapCanister) -> async ();
         listingReferrer : shared query (_referrer: Principal) -> async (_valid: Bool, verified: Bool);
-        getPairListingReferrers : shared query (_pair: SwapCanister) -> async (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time)]);
+        getPairListingReferrers : shared query (_pair: SwapCanister) -> async (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time, Text)]);
     };
 };

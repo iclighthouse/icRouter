@@ -41,7 +41,23 @@ import Ledger "./lib/Ledger";
 import ERC721 "./lib/ERC721";
 import Timer "mo:base/Timer";
 import Order "mo:base/Order";
+import ICOracle "lib/ICOracle";
+import Error "mo:base/Error";
 
+/*
+Pair Score: 
+- (Not verified) ListingReferrer Propose: +10
+- Verified ListingReferrer Propose: +15
+- Sponsored (Sponsors >= 5): +20
+- TotalVol (token1 > 100000 usdt): +5
+- TotalVol (token1 > 1000000 usdt): +10
+- TotalVol (token1 > 10000000 usdt): +20
+- Liquidity (Orderbook pending orders) (token1 > 10000 usdt): +5
+- Liquidity (Orderbook pending orders) (token1 > 100000 usdt): +10
+- Liquidity (Orderbook pending orders) (token1 > 1000000 usdt): +20
+- Liquidity (Orderbook pending orders) (token1 > 10000000 usdt): +30
+ICDex: When the score >= 50, it is displayed in the list of ICDex UI trading pairs
+*/
 shared(installMsg) actor class DexRouter() = this {
     type Txid = T.Txid;  //Blob
     type AccountId = T.AccountId;
@@ -65,6 +81,7 @@ shared(installMsg) actor class DexRouter() = this {
     type TraderData = T.TraderData;
     type TraderDataResponse = T.TraderDataResponse;
     type FilledTrade = T.FilledTrade;
+    type Timestamp = Nat; // seconds
 
     private stable var setting = {
         SYS_TOKEN: Principal = Principal.fromText("5573k-xaaaa-aaaak-aacnq-cai");
@@ -75,8 +92,11 @@ shared(installMsg) actor class DexRouter() = this {
     private let version_: Text = "0.8";
     private let swapCyclesInit: Nat = 1_000_000_000_000; 
     private let ic: IC.Self = actor("aaaaa-aa");
+    private let usd_decimals: Nat = 18;
     private let blackhole: Principal = Principal.fromText("7hdtw-jqaaa-aaaak-aaccq-cai");
-    private let nftPlanetCards = "goncb-kqaaa-aaaap-aakpa-cai"; // ICLighthouse Planet Cards
+    private let icp_: Principal = Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai");
+    private let oracle_: Principal = Principal.fromText("pncff-zqaaa-aaaai-qnp3a-cai");
+    private stable var oracleData: ([ICOracle.DataResponse], Timestamp) = ([], 0); // ICP/USD sid=2
     // private stable var pause: Bool = false; 
     private stable var owner: Principal = installMsg.caller;
     private stable var sysToken: DRC20.Self = actor(Principal.toText(setting.SYS_TOKEN));
@@ -84,7 +104,7 @@ shared(installMsg) actor class DexRouter() = this {
     private stable var dexList =  List.nil<(DexName, Principal)>(); 
     private stable var pairs: Trie.Trie<PairCanisterId, (pair: SwapPair, score: Nat)> = Trie.empty(); // **
     private stable var markets: Trie.Trie<Text, [PairCanisterId]> = Trie.empty(); // ICP USDT....
-    private stable var pairProposals: Trie.Trie<PairCanisterId, (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time)])> = Trie.empty();
+    private stable var pairSponsors: Trie.Trie<PairCanisterId, (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)])> = Trie.empty();
     private stable var pairLiquidity: Trie.Trie<PairCanisterId, (liquidity: ICDex.Liquidity, time: Time.Time)> = Trie.empty();
     private stable var pairLiquidity2: Trie.Trie<PairCanisterId, (liquidity: ICDex.Liquidity2, time: Time.Time)> = Trie.empty();
     private stable var listingReferrers: Trie.Trie<Principal, ListingReferrer> = Trie.empty();
@@ -93,8 +113,6 @@ shared(installMsg) actor class DexRouter() = this {
     private stable var dexCompetitions: Trie.Trie<Nat, DexCompetition> = Trie.empty();
     private stable var dexCompetitionClosedPrice: Trie.Trie<Nat, [(Principal, Float, Time.Time)]> = Trie.empty();
     private stable var dexCompetitionTraders: Trie.Trie2D<Nat, AccountId, [TraderData]> = Trie.empty();
-    private stable var nfts: Trie.Trie<AccountId, [(ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance)]> = Trie.empty();
-    private stable var nftStaked: Trie.Trie<AccountId, [(Text, ERC721.TokenIndex, Time.Time)]> = Trie.empty(); // Locked
     private stable var wasm: [Nat8] = [];
     private stable var wasmVersion: Text = "";
     
@@ -150,6 +168,18 @@ shared(installMsg) actor class DexRouter() = this {
     };
     private func _inDexList(_name: DexName) : Bool { 
         return Option.isSome(List.find(dexList, func (item:(DexName, Principal)):Bool{ item.0 == _name }));
+    };
+    private func _now() : Timestamp{
+        return Int.abs(Time.now() / 1_000_000_000);
+    };
+    private func _natToFloat(_n: Nat) : Float{
+        let n: Int = _n;
+        return Float.fromInt(n);
+    };
+    private func _floatToNat(_f: Float) : Nat{
+        let i = Float.toInt(_f);
+        assert(i >= 0);
+        return Int.abs(i);
     };
     private func _accountIdToHex(_a: AccountId) : Text{
         return Hex.encode(Blob.toArray(_a));
@@ -216,6 +246,14 @@ shared(installMsg) actor class DexRouter() = this {
         switch(Trie.get(pairs, keyp(_pair), Principal.equal)){
             case(?(pair)){
                 pairs := Trie.put(pairs, keyp(_pair), Principal.equal, (pair.0, pair.1 + _add)).0;
+            };
+            case(_){ };
+        };
+    };
+    private func _subScore(_pair: PairCanisterId, _sub: Nat) : (){
+        switch(Trie.get(pairs, keyp(_pair), Principal.equal)){
+            case(?(pair)){
+                pairs := Trie.put(pairs, keyp(_pair), Principal.equal, (pair.0, Nat.sub(Nat.max(pair.1, _sub), _sub))).0;
             };
             case(_){ };
         };
@@ -339,6 +377,27 @@ shared(installMsg) actor class DexRouter() = this {
                 return [];
             };
         };
+    };
+    private func _fetchOracleFeed(): async* (){
+        let oralce: ICOracle.Self = actor(Principal.toText(oracle_));
+        let res = await oralce.latest(#Crypto);
+        oracleData := (res, _now());
+    };
+    private func _getPrice(_token: Principal): Nat{ // 1 smallest _token = ? smallest USDT
+        var sid: Nat = 0;
+        var unit: Nat = 1;
+        if (_token == icp_){
+            sid := 2;
+            unit := 10000000000; // USDT_Decimals 18 - ICP_Decimals 8
+        }else{
+            return 1; // USDT
+        };
+        for(item in oracleData.0.vals()){
+            if (item.sid == sid){
+                return  unit * item.data.1 / (10 ** item.decimals);
+            };
+        };
+        return 0;
     };
 
     /* =====================
@@ -602,100 +661,128 @@ shared(installMsg) actor class DexRouter() = this {
         };
         return false;
     };
-    // private func _checkAndSetProposal(_pair: PairCanisterId, _sponsored: Bool, _referrers: [(ListingReferrer, Time.Time)], _referrer: Principal) : 
-    // (Bool, [(ListingReferrer, Time.Time)]){
-    //     var count = _referrers.size();
-    //     var referrerCount : Nat = 0;
-    //     var verifiedCount : Nat = 0;
-    //     var inArray : Bool = false;
-    //     var sponsored : Bool = _sponsored;
-    //     var referrers : [(ListingReferrer, Time.Time)] = [];
-    //     for ((lr, time) in referrers.vals()){
-    //         if (_onlyReferrer(lr.referrer)) { 
-    //             referrerCount += 1;
-    //             referrers := Tools.arrayAppend(referrers, [(lr, time)]);
-    //         };
-    //         if (_onlyVerifiedReferrer(lr.referrer)) { verifiedCount += 1; };
-    //         if (lr.referrer == _referrer) { inArray := true; };
-    //     };
-    //     if (not(inArray)){
-    //         switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
-    //             case(?(referrer)){
-    //                 if (_onlyReferrer(_referrer)) { 
-    //                     referrers := Tools.arrayAppend(referrers, [(referrer, Time.now())]);
-    //                     referrerCount += 1;
-    //                     if (referrerCount > count) { _addScore(_pair, 10);};
-    //                 };
-    //                 if (_onlyVerifiedReferrer(_referrer)) { 
-    //                     verifiedCount += 1; 
-    //                     if (referrerCount > count) { _addScore(_pair, 5);};
-    //                 };
-    //             };
-    //             case(_){ };
-    //         };
-    //     };
-    //     if (not(sponsored) and verifiedCount >= 3 and referrerCount >= 5){
-    //         sponsored := true;
-    //         _addScore(_pair, 20);
-    //     };
-    //     return (sponsored, referrers);
-    // };
-    // private func _propose(_pair: PairCanisterId, _referrer: Principal) : (){
-    //     switch(Trie.get(pairProposals, keyp(_pair), Principal.equal)){
-    //         case(?(proposal)){
-    //             pairProposals := Trie.put(pairProposals, keyp(_pair), Principal.equal, _checkAndSetProposal(_pair, proposal.0, proposal.1, _referrer)).0;
-    //         };
-    //         case(_){
-    //             pairProposals := Trie.put(pairProposals, keyp(_pair), Principal.equal, _checkAndSetProposal(_pair, false, [], _referrer)).0;
-    //         };
-    //     };
-    // };
-    // private func _updateLiquidity() : async (){
-    //     var i : Nat = 0;
-    //     for ((k,v) in Trie.iter(pairs)){
-    //         var enUpdate : Bool = false;
-    //         switch(Trie.get(pairLiquidity, keyp(k), Principal.equal)){
-    //             case(?(liquidity)){
-    //                 if (Time.now() > liquidity.1 + 3600 * 1000000000){ enUpdate := true; };
-    //             };
-    //             case(_){ enUpdate := true; };
-    //         };
-    //         if (enUpdate and i < 50){
-    //             i += 1;
-    //             if (v.0.dexName == "cyclesfinance"){
-    //                 let mkt: CF.Self = actor(Principal.toText(k));
-    //                 try{
-    //                     let liquidity = await mkt.liquidity2(null);
-    //                     pairLiquidity := Trie.put(pairLiquidity, keyp(k), Principal.equal, (liquidity, Time.now())).0;
-    //                 }catch(e){};
-    //             }else if (v.0.dexName == "icswap" or v.0.dexName == "icdex"){
-    //                 let mkt: ICSwap.Self = actor(Principal.toText(k));
-    //                 try{
-    //                     let liquidity = await mkt.liquidity(null);
-    //                     pairLiquidity := Trie.put(pairLiquidity, keyp(k), Principal.equal, (liquidity, Time.now())).0;
-    //                 }catch(e){};
-    //             };
-    //         };
-    //     };
-    // };
+    private func _checkAndSetSponsor(_pair: PairCanisterId, _sponsored: Bool, _referrers: [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)], _referrer: Principal, _nftId: ERC721.TokenIdentifier) : 
+    (Bool, [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)]){
+        var count = _referrers.size();
+        var referrerCount : Nat = 0;
+        var verifiedCount : Nat = 0;
+        var inArray : Bool = false;
+        var sponsored : Bool = _sponsored;
+        var referrers : [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)] = [];
+        for ((lr, time, nftId) in referrers.vals()){
+            if (_onlyReferrer(lr.referrer)) { 
+                referrerCount += 1;
+                referrers := Tools.arrayAppend(referrers, [(lr, time, nftId)]);
+            };
+            if (_onlyVerifiedReferrer(lr.referrer)) { 
+                verifiedCount += 1; 
+            };
+            if (nftId == _nftId) { inArray := true; };
+        };
+        if (not(inArray)){
+            switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
+                case(?(referrer)){
+                    if (_onlyReferrer(_referrer)) { 
+                        referrers := Tools.arrayAppend(referrers, [(referrer, Time.now(), _nftId)]);
+                        referrerCount += 1;
+                        if (referrerCount > count) { _addScore(_pair, 10);};
+                    };
+                    if (_onlyVerifiedReferrer(_referrer)) { 
+                        verifiedCount += 1; 
+                        if (referrerCount > count) { _addScore(_pair, 5);}; // 10 + 5
+                    };
+                };
+                case(_){ };
+            };
+        };
+        if (not(sponsored) and referrerCount >= 5){
+            sponsored := true;
+            _addScore(_pair, 20);
+        };
+        return (sponsored, referrers);
+    };
+    private func _propose(_pair: PairCanisterId, _referrer: Principal, _nftId: ERC721.TokenIdentifier) : (){
+        switch(Trie.get(pairSponsors, keyp(_pair), Principal.equal)){
+            case(?(sponsor)){
+                pairSponsors := Trie.put(pairSponsors, keyp(_pair), Principal.equal, _checkAndSetSponsor(_pair, sponsor.0, sponsor.1, _referrer, _nftId)).0;
+            };
+            case(_){
+                pairSponsors := Trie.put(pairSponsors, keyp(_pair), Principal.equal, _checkAndSetSponsor(_pair, false, [], _referrer, _nftId)).0;
+            };
+        };
+    };
+    private func _updateLiquidity() : async* (){
+        var i : Nat = 0;
+        for ((k,v) in Trie.iter(pairs)){
+            var enUpdate : Bool = false;
+            switch(Trie.get(pairLiquidity, keyp(k), Principal.equal)){
+                case(?(liquidity)){
+                    if (Time.now() > liquidity.1 + 3600 * 1000000000){ enUpdate := true; };
+                };
+                case(_){ enUpdate := true; };
+            };
+            if (enUpdate and i < 50){
+                i += 1;
+                if (v.0.dexName == "cyclesfinance"){
+                    let mkt: CF.Self = actor(Principal.toText(k));
+                    try{
+                        let liquidity = await mkt.liquidity2(null);
+                        pairLiquidity := Trie.put(pairLiquidity, keyp(k), Principal.equal, (liquidity, Time.now())).0;
+                    }catch(e){};
+                }else if (v.0.dexName == "icswap" or v.0.dexName == "icdex"){
+                    let mkt: ICDex.Self = actor(Principal.toText(k));
+                    try{ 
+                        var preVol: Nat = 0;
+                        var preLiquidity: Nat = 0;
+                        switch(Trie.get(pairLiquidity2, keyp(k), Principal.equal)){
+                            case(?(l, t)){ 
+                                preVol := l.vol.value1 * _getPrice(v.0.token1.0); 
+                                preLiquidity := l.token1 * _getPrice(v.0.token1.0); 
+                            };
+                            case(_){};
+                        };
+                        let liquidity2 = await mkt.liquidity2(null);
+                        pairLiquidity2 := Trie.put(pairLiquidity2, keyp(k), Principal.equal, (liquidity2, Time.now())).0;
+                        let postVol = liquidity2.vol.value1 * _getPrice(v.0.token1.0);
+                        let postLiquidity = liquidity2.token1 * _getPrice(v.0.token1.0);
+                        let usd_t0: Nat = 10_000 * (10**usd_decimals);
+                        let usd_t1: Nat = 100_000 * (10**usd_decimals);
+                        let usd_t2: Nat = 1_000_000 * (10**usd_decimals);
+                        let usd_t3: Nat = 10_000_000 * (10**usd_decimals);
+                        if (preVol < usd_t1 and postVol >= usd_t1){ _addScore(k, 5) };
+                        if (preVol < usd_t2 and postVol >= usd_t2){ _addScore(k, 10) };
+                        if (preVol < usd_t3 and postVol >= usd_t3){ _addScore(k, 20) };
+                        if (preLiquidity < usd_t0 and postLiquidity >= usd_t0){ _addScore(k, 5) };
+                        if (preLiquidity < usd_t1 and postLiquidity >= usd_t1){ _addScore(k, 10) };
+                        if (preLiquidity < usd_t2 and postLiquidity >= usd_t2){ _addScore(k, 20) };
+                        if (preLiquidity < usd_t3 and postLiquidity >= usd_t3){ _addScore(k, 30) };
+                        if (preLiquidity >= usd_t0 and postLiquidity < usd_t0){ _subScore(k, 5) };
+                        if (preLiquidity >= usd_t1 and postLiquidity < usd_t1){ _subScore(k, 10) };
+                        if (preLiquidity >= usd_t2 and postLiquidity < usd_t2){ _subScore(k, 20) };
+                        if (preLiquidity >= usd_t3 and postLiquidity < usd_t3){ _subScore(k, 30) };
+                    }catch(e){};
+                };
+            };
+        };
+    };
     private func _getPairResponse(_dexName: ?DexName, _lr: ?Principal, _pair: PairCanisterId) : ?PairResponse{
         switch(Trie.get(pairs, keyp(_pair), Principal.equal)){
             case(?(v)){
                 if (Option.isNull(_dexName) or v.0.dexName == Option.get(_dexName, "")){
-                    var liquidity : ?ICDex.Liquidity = null;
+                    var liquidity : ?ICDex.Liquidity2 = null;
                     var sponsored : Bool = false;
-                    var lrs : [(ListingReferrer, Time.Time)] = [];
-                    switch(Trie.get(pairLiquidity, keyp(_pair), Principal.equal)){
+                    var lrs : [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)] = [];
+                    switch(Trie.get(pairLiquidity2, keyp(_pair), Principal.equal)){
                         case(?(item)){ liquidity := ?item.0 };
                         case(_){};
                     };
-                    switch(Trie.get(pairProposals, keyp(_pair), Principal.equal)){
+                    switch(Trie.get(pairSponsors, keyp(_pair), Principal.equal)){
                         case(?(item)){ 
                             sponsored := item.0; 
                             lrs := item.1;
                             switch(_lr){
                                 case(?(lr)){ 
-                                    if (Option.isNull(Array.find(lrs, func (a:(ListingReferrer, Time.Time)): Bool{ a.0.referrer == lr }))){ return null; }
+                                    if (Option.isNull(Array.find(lrs, func (a:(ListingReferrer, Time.Time, ERC721.TokenIdentifier)): Bool{ a.0.referrer == lr }))){ return null; }
                                 };
                                 case(_){};
                             };
@@ -716,85 +803,89 @@ shared(installMsg) actor class DexRouter() = this {
             case(_){ return null; };
         };
     };
-    // private func _setListingReferrer(_referrer: Principal, _item: ListingReferrer) : (){
-    //     listingReferrers := Trie.put(listingReferrers, keyp(_referrer), Principal.equal, _item).0;
-    // };
-    // private func _dropListingReferrer(_referrer: Principal) : (){
-    //     switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
-    //         case(?(referrer)){
-    //             listingReferrers := Trie.put(listingReferrers, keyp(_referrer), Principal.equal, {
-    //                 referrer = _referrer;
-    //                 name = referrer.name;
-    //                 verified = referrer.verified;
-    //                 start = referrer.start;
-    //                 end = ?Time.now();
-    //                 nftId = "";
-    //             }).0;
-    //         };
-    //         case(_){};
-    //     };
-    // };
-    public query func listingReferrer(_referrer: Principal): async (_valid: Bool, verified: Bool){
+    private func _setListingReferrer(_referrer: Principal, _item: ListingReferrer) : (){
+        listingReferrers := Trie.put(listingReferrers, keyp(_referrer), Principal.equal, _item).0;
+    };
+    private func _dropListingReferrer(_referrer: Principal) : (){
+        switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
+            case(?(referrer)){
+                listingReferrers := Trie.put(listingReferrers, keyp(_referrer), Principal.equal, {
+                    referrer = _referrer;
+                    name = referrer.name;
+                    verified = referrer.verified;
+                    start = referrer.start;
+                    end = ?Time.now();
+                    nftId = "";
+                }).0;
+            };
+            case(_){};
+        };
+    };
+    public query func listingReferrer(_referrer: Principal): async (isListingReferrer: Bool, verified: Bool){
         return (_onlyReferrer(_referrer), _onlyVerifiedReferrer(_referrer));
     };
-    public query func getPairListingReferrers(_pair: PairCanisterId) : async (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time)]){
-        switch(Trie.get(pairProposals, keyp(_pair), Principal.equal)){
+    public query func getPairListingReferrers(_pair: PairCanisterId) : async (sponsored: Bool, listingReferrers: [(ListingReferrer, Time.Time, ERC721.TokenIdentifier)]){
+        switch(Trie.get(pairSponsors, keyp(_pair), Principal.equal)){
             case(?(item)){ return item };
             case(_){ return (false, []) };
         };
     };
-    // public shared(msg) func setListingReferrerByNft(_referrer: Principal, _name: Text, _nftId: Text, _collection: Text) : async (){
-    //     if (_collection == "ICLighthouse Planet Cards"){
-    //         assert(await _checkPlanetNft(_referrer, _nftId));
-    //     }else{
-    //         assert(false);
-    //     };
-    //     listingReferrers := Trie.filter(listingReferrers, func (k:Principal, v:ListingReferrer): Bool{
-    //         v.nftId == "" or v.nftId != _nftId
-    //     });
-    //     _setListingReferrer(_referrer: Principal, {
-    //         referrer = _referrer;
-    //         name = _name;
-    //         verified = false;
-    //         start = Time.now();
-    //         end = null;
-    //         nftId = _nftId;
-    //     });
-    // };
-    // public shared(msg) func setListingReferrer(_referrer: Principal, _name: Text, _verified: Bool) : async (){
-    //     assert(_onlyOwner(msg.caller));
-    //     switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
-    //         case(?(item)){
-    //             _setListingReferrer(_referrer: Principal, {
-    //                 referrer = _referrer;
-    //                 name = _name;
-    //                 verified = _verified;
-    //                 start = item.start;
-    //                 end = item.end;
-    //                 nftId = item.nftId;
-    //             });
-    //         };
-    //         case(_){
-    //             _setListingReferrer(_referrer: Principal, {
-    //                 referrer = _referrer;
-    //                 name = _name;
-    //                 verified = _verified;
-    //                 start = Time.now();
-    //                 end = null;
-    //                 nftId = "";
-    //             });
-    //         };
-    //     };
-    // };
-    // public shared(msg) func dropListingReferrer(_referrer: Principal) : async (){
-    //     assert(_onlyOwner(msg.caller));
-    //     _dropListingReferrer(_referrer);
-    // };
-    // public shared(msg) func propose(_pair: PairCanisterId): async (){
-    //     let f = _updateLiquidity();
-    //     assert(_onlyReferrer(msg.caller));
-    //     _propose(_pair, msg.caller);
-    // };
+    public shared(msg) func setListingReferrerByNft(_name: Text, _nftId: Text) : async (){
+        let account = Tools.principalToAccountBlob(msg.caller, null);
+        let _referrer = msg.caller;
+        if (not(_onlyNFTHolder(account, ?_nftId, ?#URANUS))){
+            throw Error.reject("You should stake URANUS NFT (ICLighthouse Planet Cards) to qualify as a Listing Referrer.");
+        };
+        listingReferrers := Trie.filter(listingReferrers, func (k:Principal, v:ListingReferrer): Bool{
+            v.nftId == "" or v.nftId != _nftId
+        });
+        _setListingReferrer(_referrer: Principal, {
+            referrer = _referrer;
+            name = _name;
+            verified = false;
+            start = Time.now();
+            end = null;
+            nftId = _nftId;
+        });
+    };
+    public shared(msg) func verifyListingReferrer(_referrer: Principal, _name: Text, _verified: Bool) : async (){
+        assert(_onlyOwner(msg.caller));
+        switch(Trie.get(listingReferrers, keyp(_referrer), Principal.equal)){
+            case(?(item)){
+                _setListingReferrer(_referrer: Principal, {
+                    referrer = item.referrer;
+                    name = _name;
+                    verified = _verified;
+                    start = item.start;
+                    end = item.end;
+                    nftId = item.nftId;
+                });
+            };
+            case(_){
+                throw Error.reject("Referrer does not exist!");
+            };
+        };
+    };
+    public shared(msg) func dropListingReferrer(_referrer: Principal) : async (){
+        assert(_onlyOwner(msg.caller));
+        _dropListingReferrer(_referrer);
+    };
+    /// For each pair proposed, NFT will add 30 days to the lock-up period. 
+    /// After the lock-up period reaches 360 days it will not be possible to continue proposing.
+    public shared(msg) func propose(_pair: PairCanisterId): async (){
+        assert(_onlyReferrer(msg.caller));
+        let account = Tools.principalToAccountBlob(msg.caller, null);
+        switch(_findNFT(account, ?#URANUS, false)){
+            case(?nft){
+                _stake(account, "ListingReferrer", nft.1, 30 * 24 * 3600 * 1000000000); // 30 days
+                _propose(_pair, msg.caller, nft.1);
+            };
+            case(_){
+                throw Error.reject("#URANUS NFT does not exist!");
+            };
+        };
+    };
+    /// Get pair list with sponsors info
     public query func getPairs2(_dexName: ?DexName, _lr: ?Principal, _page: ?Nat, _size: ?Nat) : async TrieList<PairCanisterId, PairResponse>{
         var trie : Trie.Trie<PairCanisterId, PairResponse> = Trie.empty();
         let page = Option.get(_page, 1);
@@ -1311,13 +1402,20 @@ shared(installMsg) actor class DexRouter() = this {
     public shared(msg) func registerDexCompetition(_sa: ?[Nat8]): async Bool{
         // assert(Tools.principalForm(msg.caller) == #OpaqueId); // Trader Canister 
         let account = Tools.principalToAccountBlob(msg.caller, _sa);
-        // assert(_onlyNFTStaked2(account, ?"DexCompetition"));
         let round = dexCompetitionIndex;
         switch(Trie.get(dexCompetitions, keyn(round), Nat.equal)){
             case(?(competition)){
                 if (Time.now() < competition.start or Time.now() > competition.end){
                     return false;
                 };
+                // switch(_findNFT(account, null, true)){
+                //     case(?nft){
+                //         _stake(account, "DexCompetition", nft.1, competition.end - Time.now());
+                //     };
+                //     case(_){
+                //         return false;
+                //     };
+                // };
                 switch(_getCompetitionTrader(round, account)){
                     case(?(traderData)){ return false };
                     case(_){
@@ -1366,221 +1464,306 @@ shared(installMsg) actor class DexRouter() = this {
     // End: DexCompetitions
 
 
-
-    /* =====================
+    /* =======================
       NFT
-    ====================== */
-    // private func _checkPlanetNft(_referrer: Principal, _nftId: Text) : async Bool{
-    //     let nft: ERC721.Self = actor("goncb-kqaaa-aaaap-aakpa-cai");
-    //     let balance = await nft.balance({ user = #principal(_referrer); token = _nftId; });
-    //     switch(balance){
-    //         case(#ok(amount)){ if (amount < 1){ return false; }; };
-    //         case(_){ return false; };
-    //     };
-    //     let metadata = await nft.metadata(_nftId);
-    //     switch(metadata){
-    //         case(#ok(#nonfungible({metadata=?(data)}))){
-    //             if (data.size() > 0){
-    //                 switch(Text.decodeUtf8(data)){
-    //                     case(?(json)){
-    //                         let str = Text.replace(json, #char(' '), "");
-    //                         if (Text.contains(str, #text("lr=\"1\"")) or Text.contains(str, #text("lr=1"))){
-    //                             return true;
-    //                         };
-    //                     };
-    //                     case(_){};
-    //                 };
-    //             };
-    //         };
-    //         case(_){};
-    //     };
-    //     return false;
-    // };
-    // private func _nftIndexToId(_index: ERC721.TokenIndex): ERC721.TokenIdentifier{
-    //     var data: [Nat8] = [10,116,105,100]; // \x0Atid
-    //     data := Tools.arrayAppend(data, Blob.toArray(Principal.toBlob(Principal.fromText(nftPlanetCards))));
-    //     data := Tools.arrayAppend(data, Binary.BigEndian.fromNat32(_index));
-    //     return Principal.toText(Principal.fromBlob(Blob.fromArray(data)));
-    // };
-    // private func _NFTTransferFrom(_caller: Principal, _nftIndex: ERC721.TokenIndex, _sa: ?[Nat8]) : async ?ERC721.Balance{
-    //     let accountId = Tools.principalToAccountBlob(_caller, _sa);
-    //     var user: ERC721.User = #principal(_caller);
-    //     if (Option.isSome(_sa)){
-    //         user := #address(Tools.principalToAccountHex(_caller, _sa));
-    //     };
-    //     let nftActor: ERC721.Self = actor(nftPlanetCards);
-    //     let nftId = _nftIndexToId(_nftIndex);
-    //     let args: ERC721.TransferRequest = {
-    //         from = user;
-    //         to = #principal(Principal.fromActor(this));
-    //         token = nftId;
-    //         amount = 1;
-    //         memo = Blob.fromArray([]);
-    //         notify = false;
-    //         subaccount = _sa;
-    //     };
-    //     switch(await nftActor.transfer(args)){
-    //         case(#ok(v)){ 
-    //             if (v == 0){ return null; };
-    //             switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
-    //                 case(?(item)){ nfts := Trie.put(nfts, keyb(accountId), Blob.equal, Tools.arrayAppend(item, [(user, _nftIndex, nftId, v)])).0 };
-    //                 case(_){ nfts := Trie.put(nfts, keyb(accountId), Blob.equal, [(user, _nftIndex, nftId, v)]).0 };
-    //             };
-    //             return ?v; 
-    //         };
-    //         case(_){ return null; };
-    //     };
-    // };
-    // private func _NFTWithdraw(_caller: Principal, _nftIndex: ?ERC721.TokenIndex,_sa: ?[Nat8]) : async (){
-    //     type NFT = (ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance);
-    //     let accountId = Tools.principalToAccountBlob(_caller, _sa);
-    //     switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
-    //         case(?(items)){ 
-    //             let nftActor: ERC721.Self = actor(nftPlanetCards);
-    //             switch(_nftIndex){
-    //                 case(?(nftIndex)){
-    //                     switch(Array.find(items, func (t: NFT): Bool{ t.1 == nftIndex })){
-    //                         case(?(nft)){
-    //                             let args: ERC721.TransferRequest = {
-    //                                 from = #principal(Principal.fromActor(this));
-    //                                 to = nft.0;
-    //                                 token = nft.2;
-    //                                 amount = nft.3;
-    //                                 memo = Blob.fromArray([]);
-    //                                 notify = false;
-    //                                 subaccount = null;
-    //                             };
-    //                             let f = nftActor.transfer(args);
-    //                             let newItems = Array.filter(items, func (t: NFT): Bool{ t.1 != nftIndex });
-    //                             if (newItems.size() > 0){
-    //                                 nfts := Trie.put(nfts, keyb(accountId), Blob.equal, newItems).0;
-    //                             }else{
-    //                                 nfts := Trie.remove(nfts, keyb(accountId), Blob.equal).0;
-    //                             };
-    //                         };
-    //                         case(_){};
-    //                     };
-    //                 };
-    //                 case(_){
-    //                     for(nft in items.vals()){
-    //                         let args: ERC721.TransferRequest = {
-    //                             from = #principal(Principal.fromActor(this));
-    //                             to = nft.0;
-    //                             token = nft.2;
-    //                             amount = nft.3;
-    //                             memo = Blob.fromArray([]);
-    //                             notify = false;
-    //                             subaccount = null;
-    //                         };
-    //                         let f = nftActor.transfer(args);
-    //                     };
-    //                     nfts := Trie.remove(nfts, keyb(accountId), Blob.equal).0;
-    //                 };
-    //             };
-    //          };
-    //         case(_){};
-    //     };
-    // };
-    // private func _stake(_owner: AccountId, _name: Text, _nftIndex: ERC721.TokenIndex, _unLockTime: Time.Time) : (){
-    //     type StakedNFT = (Text, ERC721.TokenIndex, Time.Time);
-    //     switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
-    //         case(?(items)){
-    //             var newItems = Array.filter(items, func (t: StakedNFT): Bool{ t.0 != _name and Time.now() < t.2 });
-    //             newItems := Tools.arrayAppend(newItems, [(_name, _nftIndex, _unLockTime)]);
-    //             nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, newItems).0;
-    //         };
-    //         case(_){
-    //             nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, [(_name, _nftIndex, _unLockTime)]).0;
-    //         };
-    //     };
-    // };
-    // private func _unStake(_owner: AccountId, _name: Text) : (){
-    //     type StakedNFT = (Text, ERC721.TokenIndex, Time.Time);
-    //     switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
-    //         case(?(items)){
-    //             let newItems = Array.filter(items, func (t: StakedNFT): Bool{ t.0 != _name and Time.now() < t.2 });
-    //             if (newItems.size() > 0){
-    //                 nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, newItems).0;
-    //             }else{
-    //                 nftStaked := Trie.remove(nftStaked, keyb(_owner), Blob.equal).0;
-    //             };
-    //         };
-    //         case(_){};
-    //     };
-    // };
-    // private func _onlyNFTHolder(_owner: AccountId, _indexRange: ?(start: Nat32, end: Nat32)) : Bool{
-    //     switch(Trie.get(nfts, keyb(_owner), Blob.equal)){
-    //         case(?(items)){ 
-    //             switch(_indexRange){
-    //                 case(?(start, end)){
-    //                     for ((user, nftIndex, nftId, v) in items.vals()){
-    //                         if (nftIndex >= start and nftIndex <= end) {
-    //                             return true; 
-    //                         };
-    //                     };
-    //                     return false;
-    //                 };
-    //                 case(_){ return items.size() > 0 };
-    //             };
-    //         };
-    //         case(_){ return false; };
-    //     };
-    // };
-    // private func _onlyNFTStaked(_owner: AccountId, _index: ?ERC721.TokenIndex) : Bool{
-    //     switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
-    //         case(?(items)){ 
-    //             for ((eventName, nftIndex, time) in items.vals()){
-    //                 switch(_index){
-    //                     case(?(index)){ if (index == nftIndex and Time.now() <= time){ return true }  };
-    //                     case(_){ if (Time.now() <= time){ return true } };
-    //                 };
-    //             };
-    //             return false;
-    //         };
-    //         case(_){ return false };
-    //     };
-    // };
-    // private func _onlyNFTStaked2(_owner: AccountId, _name: ?Text) : Bool{
-    //     switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
-    //         case(?(items)){ 
-    //             for ((eventName, nftIndex, time) in items.vals()){
-    //                 switch(_name){
-    //                     case(?(name)){ if (name == eventName and Time.now() <= time){ return true }  };
-    //                     case(_){ if (Time.now() <= time){ return true } };
-    //                 };
-    //             };
-    //             return false;
-    //         };
-    //         case(_){ return false };
-    //     };
-    // };
-    // public shared(msg) func nft_deposit(_nftIndex: ERC721.TokenIndex, _sa: ?[Nat8]) : async Bool{
-    //     switch(await _NFTTransferFrom(msg.caller, _nftIndex, _sa)){
-    //         case(?(v)){ 
-    //             return v > 0;
-    //         };
-    //         case(_){ return false; };
-    //     };
-    // };
-    // public shared(msg) func nft_withdraw(_nftIndex: ?ERC721.TokenIndex, _sa: ?[Nat8]) : async (){
-    //     let accountId = Tools.principalToAccountBlob(msg.caller, _sa);
-    //     assert(_onlyNFTHolder(accountId, null));
-    //     assert(not(_onlyNFTStaked(accountId, _nftIndex)));
-    //     await _NFTWithdraw(msg.caller, _nftIndex, _sa);
-    // };
-    // public query func nft_list() : async [[(ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance)]]{
-    //     Trie.toArray(nfts, func (k:AccountId, v:[(ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance)]) : 
-    //     [(ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance)]{
-    //         return v;
-    //     });
-    // };
-    // public query func nft_balance(_owner: Address) : async [(ERC721.User, ERC721.TokenIndex, ERC721.TokenIdentifier, ERC721.Balance)]{
-    //     let accountId = _getAccountId(_owner);
-    //     switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
-    //         case(?(item)){ return item };
-    //         case(_){ return []; };
-    //     };
-    // };
+    ========================= */
+    // private stable var nftVipMakers: Trie.Trie<Text, (AccountId, [Principal])> = Trie.empty(); 
+    type NFTType = {#NEPTUNE/*0-4*/; #URANUS/*5-14*/; #SATURN/*15-114*/; #JUPITER/*115-314*/; #MARS/*315-614*/; #EARTH/*615-1014*/; #VENUS/*1015-1514*/; #MERCURY/*1515-2021*/; #UNKNOWN};
+    type CollectionId = Principal;
+    type NFT = (ERC721.User, ERC721.TokenIdentifier, ERC721.Balance, NFTType, CollectionId);
+    private stable var nfts: Trie.Trie<AccountId, [NFT]> = Trie.empty();
+    private let sa_zero : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    private let nftPlanetCards: Principal = Principal.fromText("goncb-kqaaa-aaaap-aakpa-cai"); // ICLighthouse Planet Cards
+    private func _onlyNFTHolder(_owner: AccountId, _nftId: ?ERC721.TokenIdentifier, _nftType: ?NFTType) : Bool{
+        switch(Trie.get(nfts, keyb(_owner), Blob.equal), _nftId, _nftType){
+            case(?(items), null, null){ return items.size() > 0 };
+            case(?(items), ?(nftId), ?(nftType)){
+                switch(Array.find(items, func(t: NFT): Bool{ nftId == t.1 and nftType == t.3 and t.2 > 0 })){
+                    case(?(user, nftId, balance, nType, collId)){ return balance > 0 };
+                    case(_){};
+                };
+            };
+            case(?(items), ?(nftId), null){
+                switch(Array.find(items, func(t: NFT): Bool{ nftId == t.1 and t.2 > 0 })){
+                    case(?(user, nftId, balance, nType, collId)){ return balance > 0 };
+                    case(_){};
+                };
+            };
+            case(?(items), null, ?(nftType)){
+                switch(Array.find(items, func(t: NFT): Bool{ nftType == t.3 and t.2 > 0 })){
+                    case(?(user, nftId, balance, nType, collId)){ return balance > 0 };
+                    case(_){};
+                };
+            };
+            case(_, _, _){};
+        };
+        return false;
+    };
+    private func _nftType(_a: ?AccountId, _nftId: Text): NFTType{
+        switch(_a){
+            case(?(accountId)){
+                switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
+                    case(?(items)){ 
+                        switch(Array.find(items, func(t: NFT): Bool{ _nftId == t.1 })){
+                            case(?(user, nftId, balance, nftType, collId)){ return nftType };
+                            case(_){};
+                        };
+                    };
+                    case(_){};
+                };
+            };
+            case(_){
+                for ((accountId, items) in Trie.iter(nfts)){
+                    switch(Array.find(items, func(t: NFT): Bool{ _nftId == t.1 })){
+                        case(?(user, nftId, balance, nftType, collId)){ return nftType };
+                        case(_){};
+                    };
+                };
+            };
+        };
+        return #UNKNOWN;
+    };
+    private func _remote_nftType(_collId: CollectionId, _nftId: Text): async* NFTType{
+        if (_collId == nftPlanetCards){
+            let nft: ERC721.Self = actor(Principal.toText(_collId));
+            let metadata = await nft.metadata(_nftId);
+            switch(metadata){
+                case(#ok(#nonfungible({metadata=?(data)}))){
+                    if (data.size() > 0){
+                        switch(Text.decodeUtf8(data)){
+                            case(?(json)){
+                                let str = Text.replace(json, #char(' '), "");
+                                if (Text.contains(str, #text("\"name\":\"NEPTUNE")) or Text.contains(str, #text("name:\"NEPTUNE"))){
+                                    return #NEPTUNE;
+                                }else if (Text.contains(str, #text("\"name\":\"URANUS")) or Text.contains(str, #text("name:\"URANUS"))){
+                                    return #URANUS;
+                                }else if (Text.contains(str, #text("\"name\":\"SATURN")) or Text.contains(str, #text("name:\"SATURN"))){
+                                    return #SATURN;
+                                }else if (Text.contains(str, #text("\"name\":\"JUPITER")) or Text.contains(str, #text("name:\"JUPITER"))){
+                                    return #JUPITER;
+                                }else if (Text.contains(str, #text("\"name\":\"MARS")) or Text.contains(str, #text("name:\"MARS"))){
+                                    return #MARS;
+                                }else if (Text.contains(str, #text("\"name\":\"EARTH")) or Text.contains(str, #text("name:\"EARTH"))){
+                                    return #EARTH;
+                                }else if (Text.contains(str, #text("\"name\":\"VENUS")) or Text.contains(str, #text("name:\"VENUS"))){
+                                    return #VENUS;
+                                }else if (Text.contains(str, #text("\"name\":\"MERCURY")) or Text.contains(str, #text("name:\"MERCURY"))){
+                                    return #MERCURY;
+                                };
+                            };
+                            case(_){};
+                        };
+                    };
+                };
+                case(_){};
+            };
+        };
+        return #UNKNOWN;
+    };
+    private func _remote_isNftHolder(_collId: CollectionId, _a: AccountId, _nftId: Text) : async* Bool{
+        let nft: ERC721.Self = actor(Principal.toText(_collId));
+        let balance = await nft.balance({ user = #address(_accountIdToHex(_a)); token = _nftId; });
+        switch(balance){
+            case(#ok(amount)){ return amount > 0; };
+            case(_){ return false; };
+        };
+    };
+    private func _NFTPut(_a: AccountId, _nft: NFT) : (){
+        switch(Trie.get(nfts, keyb(_a), Blob.equal)){
+            case(?(items)){ 
+                let _items = Array.filter(items, func(t: NFT): Bool{ t.1 != _nft.1 });
+                nfts := Trie.put(nfts, keyb(_a), Blob.equal, Tools.arrayAppend(_items, [_nft])).0 
+            };
+            case(_){ 
+                nfts := Trie.put(nfts, keyb(_a), Blob.equal, [_nft]).0 
+            };
+        };
+    };
+    private func _NFTRemove(_a: AccountId, _nftId: ERC721.TokenIdentifier) : (){
+        switch(Trie.get(nfts, keyb(_a), Blob.equal)){
+            case(?(items)){ 
+                let _items = Array.filter(items, func(t: NFT): Bool{ t.1 != _nftId });
+                if (_items.size() > 0){
+                    nfts := Trie.put(nfts, keyb(_a), Blob.equal, _items).0;
+                }else{
+                    nfts := Trie.remove(nfts, keyb(_a), Blob.equal).0;
+                };
+            };
+            case(_){};
+        };
+    };
+    private func _NFTTransferFrom(_caller: Principal, _collId: CollectionId, _nftId: ERC721.TokenIdentifier, _sa: ?[Nat8]) : async* ERC721.TransferResponse{
+        let accountId = Tools.principalToAccountBlob(_caller, _sa);
+        var user: ERC721.User = #principal(_caller);
+        if (Option.isSome(_sa) and _sa != ?sa_zero){
+            user := #address(Tools.principalToAccountHex(_caller, _sa));
+        };
+        let nftActor: ERC721.Self = actor(Principal.toText(_collId));
+        let args: ERC721.TransferRequest = {
+            from = user;
+            to = #principal(Principal.fromActor(this));
+            token = _nftId;
+            amount = 1;
+            memo = Blob.fromArray([]);
+            notify = false;
+            subaccount = null;
+        };
+        let nftType = await* _remote_nftType(_collId, _nftId);
+        let res = await nftActor.transfer(args);
+        switch(res){
+            case(#ok(v)){ 
+                _NFTPut(accountId, (user, _nftId, v, nftType, _collId));
+            };
+            case(_){};
+        };
+        return res;
+    };
+    private func _NFTWithdraw(_caller: Principal, _nftId: ?ERC721.TokenIdentifier, _sa: ?[Nat8]) : async* (){
+        let accountId = Tools.principalToAccountBlob(_caller, _sa);
+        // Hooks used to check binding
+        assert(not(_onlyNFTStakedByNftId(accountId, _nftId, 0)));
+        switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
+            case(?(item)){ 
+                for(nft in item.vals()){
+                    let nftActor: ERC721.Self = actor(Principal.toText(nft.4));
+                    let args: ERC721.TransferRequest = {
+                        from = #principal(Principal.fromActor(this));
+                        to = nft.0;
+                        token = nft.1;
+                        amount = nft.2;
+                        memo = Blob.fromArray([]);
+                        notify = false;
+                        subaccount = null;
+                    };
+                    switch(await nftActor.transfer(args)){
+                        case(#ok(balance)){
+                            _NFTRemove(accountId, nft.1);
+                            // Hooks used to unbind all
+                            _dropListingReferrer(_caller);
+                        };
+                        case(#err(e)){};
+                    };
+                };
+             };
+            case(_){};
+        };
+    };
+    public query func NFTs() : async [(AccountId, [NFT])]{
+        return Trie.toArray<AccountId, [NFT], (AccountId, [NFT])>(nfts, func (k:AccountId, v:[NFT]) : (AccountId, [NFT]){  (k, v) });
+    };
+    public query func NFTBalance(_owner: Address) : async [NFT]{
+        let accountId = _getAccountId(_owner);
+        switch(Trie.get(nfts, keyb(accountId), Blob.equal)){
+            case(?(items)){ return items };
+            case(_){ return []; };
+        };
+    };
+    public shared(msg) func NFTDeposit(_collectionId: CollectionId, _nftId: ERC721.TokenIdentifier, _sa: ?[Nat8]) : async (){
+        let r = await* _NFTTransferFrom(msg.caller, _collectionId, _nftId, _sa);
+    };
+    public shared(msg) func NFTWithdraw(_nftId: ?ERC721.TokenIdentifier, _sa: ?[Nat8]) : async (){
+        let accountId = Tools.principalToAccountBlob(msg.caller, _sa);
+        assert(_onlyNFTHolder(accountId, _nftId, null));
+        await* _NFTWithdraw(msg.caller, _nftId, _sa);
+    };
+
+    /* ===== functions for Specific Permissions ==== */
+    type StakedNFT = (name: Text, nftId: ERC721.TokenIdentifier, unlockTime: Time.Time);
+    private stable var nftStaked: Trie.Trie<AccountId, [StakedNFT]> = Trie.empty(); // Locked
+    private func _nftIndexToId(_collId: CollectionId, _index: ERC721.TokenIndex): ERC721.TokenIdentifier{
+        var data: [Nat8] = [10,116,105,100]; // \x0Atid
+        data := Tools.arrayAppend(data, Blob.toArray(Principal.toBlob(_collId)));
+        data := Tools.arrayAppend(data, Binary.BigEndian.fromNat32(_index));
+        return Principal.toText(Principal.fromBlob(Blob.fromArray(data)));
+    };
+    private func _findNFT(_owner: AccountId, _nftType: ?NFTType, _shouldNotStaked: Bool) : ?NFT{
+        switch(Trie.get(nfts, keyb(_owner), Blob.equal), _nftType, _shouldNotStaked){
+            case(?(items), ?nftType, true){ return Array.find(items, func (t: NFT): Bool{ t.3 == nftType and not(_onlyNFTStakedByNftId(_owner, ?t.1, 0)) }); };
+            case(?(items), ?nftType, false){ return Array.find(items, func (t: NFT): Bool{ t.3 == nftType }); };
+            case(?(items), _, true){ if (items.size() > 0){ return Array.find(items, func (t: NFT): Bool{ not(_onlyNFTStakedByNftId(_owner, ?t.1, 0)) }); }else { return null } };
+            case(?(items), _, false){ if (items.size() > 0){ return ?items[0] }else { return null } };
+            case(_){ return null; };
+        };
+    };
+    private func _onlyNFTStakedByNftId(_owner: AccountId, _nftId: ?ERC721.TokenIdentifier, _minPeriod: Time.Time) : Bool{
+        switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
+            case(?(items)){ 
+                for ((name, nftId, time) in items.vals()){
+                    switch(_nftId){
+                        case(?(id)){ if (id == nftId and Time.now() + _minPeriod <= time){ return true }  };
+                        case(_){ if (Time.now() + _minPeriod <= time){ return true } };
+                    };
+                };
+                return false;
+            };
+            case(_){ return false };
+        };
+    };
+    private func _onlyNFTStaked(_owner: AccountId, _name: ?Text, _minPeriod: Time.Time) : Bool{
+        switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
+            case(?(items)){ 
+                for ((name, nftId, time) in items.vals()){
+                    switch(_name){
+                        case(?(n)){ if (n == name and Time.now() + _minPeriod <= time){ return true }  };
+                        case(_){ if (Time.now() + _minPeriod <= time){ return true } };
+                    };
+                };
+                return false;
+            };
+            case(_){ return false };
+        };
+    };
+    private func _stake(_owner: AccountId, _name: Text, _nftId: ERC721.TokenIdentifier, _lockPeriod: Time.Time) : (){
+        var _unLockTime : Time.Time = Time.now() + _lockPeriod;
+        assert(_onlyNFTHolder(_owner, ?_nftId, null));
+        switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
+            case(?(items)){
+                switch(Array.find(items, func (t: StakedNFT): Bool{ t.0 == _name and Time.now() < t.2 })){
+                    case(?item){ _unLockTime := item.2 + _lockPeriod };
+                    case(_){};
+                };
+                if (_name == "ListingReferrer"){
+                    assert(_unLockTime - Time.now() <= 360 * 24 * 3600 * 1000000000);
+                };
+                var newItems = Array.filter(items, func (t: StakedNFT): Bool{ t.0 != _name and Time.now() < t.2 });
+                newItems := Tools.arrayAppend(newItems, [(_name, _nftId, _unLockTime)]);
+                nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, newItems).0;
+            };
+            case(_){
+                nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, [(_name, _nftId, _unLockTime)]).0;
+            };
+        };
+    };
+    private func _unStake(_owner: AccountId, _name: Text) : (){
+        assert(_onlyNFTStaked(_owner, ?_name, 0));
+        switch(Trie.get(nftStaked, keyb(_owner), Blob.equal)){
+            case(?(items)){
+                let newItems = Array.filter(items, func (t: StakedNFT): Bool{ t.0 != _name and Time.now() < t.2 });
+                if (newItems.size() > 0){
+                    nftStaked := Trie.put(nftStaked, keyb(_owner), Blob.equal, newItems).0;
+                }else{
+                    nftStaked := Trie.remove(nftStaked, keyb(_owner), Blob.equal).0;
+                };
+            };
+            case(_){};
+        };
+    };
+    public shared(msg) func NFTUnStake(_accountId: AccountId, _permissionName: Text) : async (){
+        assert(_onlyOwner(msg.caller));
+        _unStake(_accountId, _permissionName);
+    };
+    public query func NFTStakedList(): async [(AccountId, [StakedNFT])]{
+        return Trie.toArray<AccountId, [StakedNFT], (AccountId, [StakedNFT])>(nftStaked, func (k:AccountId, v:[StakedNFT]) : (AccountId, [StakedNFT]){
+            (k, Array.filter(v, func (t: StakedNFT): Bool{ Time.now() < t.2 })) }
+        );
+    };
+    public query func NFTStaked(_owner: Address) : async [StakedNFT]{
+        let accountId = _getAccountId(_owner);
+        switch(Trie.get(nftStaked, keyb(accountId), Blob.equal)){
+            case(?(items)){ return Array.filter(items, func (t: StakedNFT): Bool{ Time.now() < t.2 }); };
+            case(_){ return []; };
+        };
+    };
     // End: NFTs
 
     /* =====================
@@ -1629,6 +1812,8 @@ shared(installMsg) actor class DexRouter() = this {
             let tid: Nat = now / competitionTimerInterval;
             competitionTimerId := Timer.setTimer(#seconds((tid+1)*competitionTimerInterval - now + 1), timerTask);
         };
+        try{ await* _fetchOracleFeed() }catch(e){};
+        try{ await* _updateLiquidity() }catch(e){};
     };
     public shared(msg) func timerStart(_intervalSeconds: Nat): async (){
         assert(_onlyOwner(msg.caller));
