@@ -5,18 +5,18 @@
  * Github     : https://github.com/iclighthouse/
  */
 import Array "mo:base/Array";
-import Binary "lib/Binary";
+import Binary "mo:icl/Binary";
 import Blob "mo:base/Blob";
 import Cycles "mo:base/ExperimentalCycles";
-import DIP20 "lib/DIP20";
-import DRC20 "lib/DRC20";
-import DRC207 "lib/DRC207";
+import DIP20 "mo:icl/DIP20";
+import DRC20 "mo:icl/DRC20";
+import DRC207 "mo:icl/DRC207";
 import Float "mo:base/Float";
 import Hash "mo:base/Hash";
-import Hex "lib/Hex";
-import IC "lib/IC";
-import CF "lib/CF";
-import ICDex "lib/ICDexTypes";
+import Hex "mo:icl/Hex";
+import IC "mo:icl/IC";
+import CF "mo:icl/CF";
+import ICDex "mo:icl/ICDexTypes";
 import Int "mo:base/Int";
 import Int64 "mo:base/Int64";
 import Iter "mo:base/Iter";
@@ -26,22 +26,22 @@ import Nat32 "mo:base/Nat32";
 import Nat64 "mo:base/Nat64";
 import Option "mo:base/Option";
 import Principal "mo:base/Principal";
-import T "lib/DexRouter";
+import T "mo:icl/DexRouter";
 import Text "mo:base/Text";
 import Time "mo:base/Time";
-import Tools "lib/Tools";
+import Tools "mo:icl/Tools";
 import List "mo:base/List";
 import Trie "mo:base/Trie"; // fix a bug
-import SHA224 "./lib/SHA224";
-import CRC32 "./lib/CRC32";
-import ICRC1 "./lib/ICRC1";
-import DRC205T "./lib/DRC205Types";
-import ICTokens "./lib/ICTokens";
-import Ledger "./lib/Ledger";
-import ERC721 "./lib/ERC721";
+import SHA224 "mo:sha224/SHA224";
+import CRC32 "mo:icl/CRC32";
+import ICRC1 "mo:icl/ICRC1";
+import DRC205T "mo:icl/DRC205Types";
+import ICTokens "mo:icl/ICTokens";
+import Ledger "mo:icl/Ledger";
+import ERC721 "mo:icl/ERC721";
 import Timer "mo:base/Timer";
 import Order "mo:base/Order";
-import ICOracle "lib/ICOracle";
+import ICOracle "mo:icl/ICOracle";
 import Error "mo:base/Error";
 
 /*
@@ -99,7 +99,7 @@ shared(installMsg) actor class DexRouter() = this {
     private stable var oracleData: ([ICOracle.DataResponse], Timestamp) = ([], 0); // ICP/USD sid=2
     // private stable var pause: Bool = false; 
     private stable var owner: Principal = installMsg.caller;
-    private stable var sysToken: DRC20.Self = actor(Principal.toText(setting.SYS_TOKEN));
+    private stable var sysToken: ICRC1.Self = actor(Principal.toText(setting.SYS_TOKEN));
     private stable var lastMonitorTime: Time.Time = 0;
     private stable var dexList =  List.nil<(DexName, Principal)>(); 
     private stable var pairs: Trie.Trie<PairCanisterId, (pair: SwapPair, score: Nat)> = Trie.empty(); // **
@@ -210,14 +210,30 @@ shared(installMsg) actor class DexRouter() = this {
     //         case(#err(e)){ return false; };
     //     };
     // };
-    private func _drc20Transfer(_token: Principal, _to: AccountId, _value: Nat) : async Bool{
-        let token0: DRC20.Self = actor(Principal.toText(_token));
-        let res = await token0.drc20_transfer(_accountIdToHex(_to), _value, null,null,null);
-        switch(res){
-            case(#ok(txid)){ return true; };
-            case(#err(e)){ return false; };
-        };
-    };
+    // private func _drc20Transfer(_token: Principal, _to: AccountId, _value: Nat) : async Bool{
+    //     let token: DRC20.Self = actor(Principal.toText(_token));
+    //     let res = await token.drc20_transfer(_accountIdToHex(_to), _value, null,null,null);
+    //     switch(res){
+    //         case(#ok(txid)){ return true; };
+    //         case(#err(e)){ return false; };
+    //     };
+    // };
+    // private func _icrc1Transfer(_token: Principal, _to: {owner: Principal; subaccount: ?Blob}, _value: Nat) : async Bool{
+    //     let token: ICRC1.Self = actor(Principal.toText(_token));
+    //     let args : ICRC1.TransferArgs = {
+    //         memo = null;
+    //         amount = _value;
+    //         fee = null;
+    //         from_subaccount = null;
+    //         to = _to;
+    //         created_at_time = null;
+    //     };
+    //     let res = await token.icrc1_transfer(args);
+    //     switch(res){
+    //         case(#ok(txid)){ return true; };
+    //         case(#err(e)){ return false; };
+    //     };
+    // };
     private func _syncFee(_pair: SwapPair, _score: Nat) : async (){
         if (_pair.dexName == "icswap" or _pair.dexName == "icdex"){
                 let swap: ICDex.Self = actor(Principal.toText(_pair.canisterId));
@@ -723,13 +739,7 @@ shared(installMsg) actor class DexRouter() = this {
             };
             if (enUpdate and i < 50){
                 i += 1;
-                if (v.0.dexName == "cyclesfinance"){
-                    let mkt: CF.Self = actor(Principal.toText(k));
-                    try{
-                        let liquidity = await mkt.liquidity2(null);
-                        pairLiquidity := Trie.put(pairLiquidity, keyp(k), Principal.equal, (liquidity, Time.now())).0;
-                    }catch(e){};
-                }else if (v.0.dexName == "icswap" or v.0.dexName == "icdex"){
+                if (v.0.dexName == "cyclesfinance" or v.0.dexName == "icswap" or v.0.dexName == "icdex"){
                     let mkt: ICDex.Self = actor(Principal.toText(k));
                     try{ 
                         var preVol: Nat = 0;

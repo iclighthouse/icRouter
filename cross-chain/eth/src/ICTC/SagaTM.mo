@@ -1,5 +1,5 @@
 /**
- * Module     : SagaTM.mo v0.5
+ * Module     : SagaTM.mo v2.0
  * Author     : ICLighthouse Team
  * Stability  : Experimental
  * Description: ICTC Saga Transaction Manager.
@@ -464,7 +464,7 @@ module {
                 case(_){ return false; };
             };
         };
-        /// Execute callback
+        /// Set the status of TO to #Done. If an error occurs and cannot be caught, the status of TO is #Doing
         private func _orderComplete(_toid: Toid) : async* ?Status{
             var callbackStatus : ?Status = null;
             switch(orders.get(_toid)){
@@ -513,6 +513,21 @@ module {
                 case(_){};
             };
             return callbackStatus;
+        };
+        private func _getTtids(_toid: Toid): [Ttid]{
+            var res : [Ttid] = [];
+            switch(orders.get(_toid)){
+                case(?(order)){
+                    for (task in List.toArray(order.tasks).vals()){ 
+                        res := TA.arrayAppend(res, [task.ttid]);
+                    };
+                    for (comp in List.toArray(order.comps).vals()){ 
+                        res := TA.arrayAppend(res, [comp.tcid]);
+                    };
+                };
+                case(_){};
+            };
+            return res;
         };
         private func _setStatus(_toid: Toid, _setting: OrderStatus) : (){
             switch(orders.get(_toid)){
@@ -945,7 +960,7 @@ module {
                 case(_){};
             };
             let actuations = actuator().actuations();
-            if (actuations.actuationThreads < 3 or Time.now() > actuations.lastActuationTime + 60*1000000000){ // 60s
+            if (actuations.actuationThreads < 5 or Time.now() > actuations.lastActuationTime + 60*1000000000){ // 60s
                 try{ 
                     let count = await* actuator().run(); 
                 }catch(e){};
@@ -954,6 +969,21 @@ module {
                 try{
                     await* _statusTest(_toid);
                 }catch(e){};
+            };
+            return _status(_toid);
+        };
+        public func runSync(_toid: Toid) : async ?OrderStatus{ 
+            switch(_status(_toid)){
+                case(?(#Todo)){ _setStatus(_toid, #Doing); };
+                case(_){};
+            };
+            let actuations = actuator().actuations();
+            if (actuations.actuationThreads > 10){
+                throw Error.reject("ICTC execution threads exceeded the limit.");
+            };
+            let count = await* actuator().runSync(if (_toid > 0) { ?_getTtids(_toid) } else { null }); 
+            if (_toid > 0){
+                try{ await* _statusTest(_toid); }catch(e){};
             };
             return _status(_toid);
         };
@@ -1086,7 +1116,7 @@ module {
         /// complete: Used to change the status of a blocked order to completed.
         public func complete(_toid: Toid, _status: OrderStatus) : async* Bool{
             assert(_status == #Done or _status == #Recovered);
-            if (_statusEqual(_toid, #Blocking) and not(_isOpening(_toid)) and (_isTasksDone(_toid) or _isCompsDone(_toid))){ // #Forward: _isCompsDone(_toid) returns true
+            if (_statusEqual(_toid, #Blocking) and not(_isOpening(_toid)) and (_isTasksDone(_toid) or _isCompsDone(_toid))){
                 _setStatus(_toid, _status);
                 var callbackStatus : ?Status = null;
                 try{ 
@@ -1119,7 +1149,7 @@ module {
         };
         public func done(_toid: Toid, _status: OrderStatus, _toCallback: Bool) : async* Bool{
             assert(_status == #Done or _status == #Recovered);
-            if (_inAliveOrders(_toid) and not(_isOpening(_toid)) and (_isTasksDone(_toid) or _isCompsDone(_toid))){ // #Forward: _isCompsDone(_toid) returns true
+            if (_inAliveOrders(_toid) and not(_isOpening(_toid)) and (_isTasksDone(_toid) or _isCompsDone(_toid))){
                 _setStatus(_toid, _status);
                 if(_toCallback){
                     var callbackStatus : ?Status = null;

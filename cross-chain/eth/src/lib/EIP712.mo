@@ -1,6 +1,6 @@
 // https://eips.ethereum.org/EIPS/eip-712
 
-import SHA3 "SHA3";
+import SHA3 "mo:sha3/lib";
 import Prelude "mo:base/Prelude";
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";

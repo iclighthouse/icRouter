@@ -1,5 +1,5 @@
 /**
- * Module     : TA.mo v0.5
+ * Module     : TA.mo v2.0
  * Author     : ICLighthouse Team
  * Stability  : Experimental
  * Description: ICTC Sync Task Actuator.
@@ -22,13 +22,13 @@ import TrieMap "mo:base/TrieMap";
 import TATypes "TATypes";
 import TaskHash "TaskHash";
 import Nat64 "mo:base/Nat64";
-import Binary "./lib/Binary";
-import ICRC1 "./lib/ICRC1";
+import Binary "mo:icl/Binary";
+import ICRC1 "mo:icl/ICRC1";
 import Error "mo:base/Error";
 // import Call "mo:base/ExperimentalInternetComputer";
 
 module {
-    public let Version: Nat = 6;
+    public let Version: Nat = 8;
     public type Domain = CallType.Domain;
     public type Status = CallType.Status;
     public type CallType = CallType.CallType;
@@ -416,69 +416,23 @@ module {
             return _removeByOid(_toid);
         };
         public func run() : async* Nat{
+            return await* runSync(null);
+        };
+        public func runSync(_ttids: ?[Ttid]) : async* Nat{
             var size: Nat = _size();
             var count: Nat = 0;
             var callCount: Nat = 0;
             var receipt: ?CallType.Receipt = null;
+            var ttids: [Ttid] = Option.get(_ttids, []);
             actuationThreads += 1;
-            while (count < limitNum and callCount < size * 5 and Option.isSome(Deque.peekFront(tasks))){
+            while (count < limitNum * (if (ttids.size() == 0){ 1 }else{ 10 }) and callCount < size * 5 and Option.isSome(Deque.peekFront(tasks))){
                 lastActuationTime := Time.now();
                 switch(Deque.popFront(tasks)){
                     case(?((ttid, task_), deque)){
                         tasks := deque;
-                        //===fix ICRC1 null of subaccount=====
                         var task: Task = task_;
-                        switch(task.callType){
-                            case(#ICRC1(#icrc1_transfer(args))){
-                                var argsTemp: ICRC1.TransferArgs = args;
-                                switch(args.to.subaccount){
-                                    case(?(_sub)){
-                                        if (Blob.toArray(_sub).size() == 0) {
-                                            argsTemp := {
-                                                from_subaccount = args.from_subaccount;
-                                                to = { owner = args.to.owner; subaccount = null; };
-                                                amount = args.amount;
-                                                fee = args.fee;
-                                                memo = args.memo;
-                                                created_at_time = args.created_at_time;
-                                            };
-                                        };
-                                    };
-                                    case(_){};
-                                };
-                                switch(args.from_subaccount){
-                                    case(?(_sub)){
-                                        if (Blob.toArray(_sub).size() == 0) {
-                                            argsTemp := {
-                                                from_subaccount = null;
-                                                to = args.to;
-                                                amount = args.amount;
-                                                fee = args.fee;
-                                                memo = args.memo;
-                                                created_at_time = args.created_at_time;
-                                            };
-                                        };
-                                    };
-                                    case(_){};
-                                };
-                                task := {
-                                    callee = task.callee;
-                                    callType = #ICRC1(#icrc1_transfer(argsTemp));
-                                    preTtid = task.preTtid;
-                                    toid = task.toid;
-                                    forTtid = task.forTtid;
-                                    attemptsMax = task.attemptsMax;
-                                    recallInterval = task.recallInterval;
-                                    cycles = task.cycles;
-                                    data = task.data;
-                                    time = task.time;
-                                };
-                            };
-                            case(_){};
-                        };
-                        //================
                         var toRedo: Bool = true;
-                        if(_filter(ttid, task)){
+                        if(_filter(ttid, task) and (_ttids == null or Option.isSome(Array.find(ttids, func (t: Ttid): Bool{ t == ttid })))){
                             //get receipt
                             switch(task.forTtid){
                                 case(?(forTtid)){
@@ -498,7 +452,7 @@ module {
                             var domain: CallType.Domain = #Canister(task.callee, task.cycles);
                             switch(task.callType){
                                 case(#This(method)){ domain := #Local(localCall); };
-                                case(#ThisAsync(method)){ domain := #Local(localCall); }; // /**comp**/
+                                //case(#ThisAsync(method)){ domain := #Local(localCall); }; // /**comp**/
                                 case(_){};
                             };
                             var result : TaskResult = (#Doing, null,null);

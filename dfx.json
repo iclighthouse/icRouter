@@ -48,7 +48,7 @@
     "defaults": {
       "build": {
         "args": "--compacting-gc",
-        "packtool": ""
+        "packtool": "vessel sources"
       }
     },
     "networks": {

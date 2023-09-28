@@ -7,7 +7,6 @@
  * Github     : https://github.com/iclighthouse/
  */
 
-import Prim "mo:⛔";
 import Trie "mo:base/Trie"; // "./lib/Elastic-Trie";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array";
@@ -29,34 +28,34 @@ import Text "mo:base/Text";
 import Deque "mo:base/Deque";
 import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
-import ICRC1 "./lib/ICRC1";
-import Binary "./lib/Binary";
-import Tools "./lib/Tools";
+import ICRC1 "mo:icl/ICRC1";
+import Binary "mo:icl/Binary";
+import Tools "mo:icl/Tools";
 import SagaTM "./ICTC/SagaTM";
-import DRC207 "./lib/DRC207";
+import DRC207 "mo:icl/DRC207";
 import Error "mo:base/Error";
 import Debug "mo:base/Debug";
 import Result "mo:base/Result";
-import EcdsaTypes "lib/bitcoin/ecdsa/Types";
-import P2pkh "lib/bitcoin/lib/P2pkh";
-import Bitcoin "lib/bitcoin/lib/Bitcoin";
-import Address "lib/bitcoin/lib/Address";
-import Transaction "lib/bitcoin/lib/Transaction";
-import Script "lib/bitcoin/lib/Script";
-import Publickey "lib/bitcoin/ecdsa/Publickey";
-import Der "lib/bitcoin/ecdsa/Der";
-import Affine "lib/bitcoin/ec/Affine";
-import TxInput "lib/bitcoin/lib/TxInput";
-import TxOutput "lib/bitcoin/lib/TxOutput";
-import ICBTC "lib/bitcoin/ICBTC";
-import Utils "lib/bitcoin/Utils";
-import Minter "lib/MinterTypes";
+import EcdsaTypes "mo:icl/bitcoin/ecdsa/Types";
+import P2pkh "mo:icl/bitcoin/lib/P2pkh";
+// import BitcoinTx "mo:icl/bitcoin/lib/Bitcoin";
+import Address "mo:icl/bitcoin/lib/Address";
+import Transaction "mo:icl/bitcoin/lib/Transaction";
+import Script "mo:icl/bitcoin/lib/Script";
+import Publickey "mo:icl/bitcoin/ecdsa/Publickey";
+import Der "mo:icl/bitcoin/ecdsa/Der";
+import Affine "mo:icl/bitcoin/ec/Affine";
+import TxInput "mo:icl/bitcoin/lib/TxInput";
+import TxOutput "mo:icl/bitcoin/lib/TxOutput";
+import ICBTC "mo:icl/Bitcoin";
+import Utils "mo:icl/bitcoin/Utils";
+import Minter "mo:icl/icBTCMinter";
 import Timer "mo:base/Timer";
-import IC "lib/IC";
-import Hex "lib/Hex";
-import CyclesMonitor "lib/CyclesMonitor";
-import KYT "lib/KYT";
-import ICEvents "lib/ICEvents";
+import IC "mo:icl/IC";
+import Hex "mo:icl/Hex";
+import CyclesMonitor "mo:icl/CyclesMonitor";
+import KYT "mo:icl/KYT";
+import ICEvents "mo:icl/ICEvents";
 
 // InitArgs = {
 //     retrieve_btc_min_amount : Nat64; // 10000

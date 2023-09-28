@@ -2,7 +2,7 @@ import Text "mo:base/Text";
 import Blob "mo:base/Blob";
 import Iter "mo:base/Iter";
 import Option "mo:base/Option";
-import IC "IC";
+import IC "mo:icl/IC";
 import Cycles "mo:base/ExperimentalCycles";
 
 module{

@@ -9,12 +9,12 @@ import Iter "mo:base/Iter";
 import Buffer "mo:base/Buffer";
 import Option "mo:base/Option";
 import Debug "mo:base/Debug";
-import Tools "icl/Tools";
+import Tools "mo:icl/Tools";
 import ABI "ABI";
-import ETHUtils "ETHUtils";
-import JSON "JSON";
+import ETHUtils "mo:icl/ETHUtils";
+import JSON "mo:json/JSON";
 import RLP "RLP";
-import SHA3 "SHA3";
+import SHA3 "mo:sha3/lib";
 
 module {
     public type EthAddress = Text;

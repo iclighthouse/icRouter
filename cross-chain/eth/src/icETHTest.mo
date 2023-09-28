@@ -7,6 +7,7 @@
  */
 
 import Prim "mo:⛔";
+import Trie "mo:base/Trie";
 import Principal "mo:base/Principal";
 import Array "mo:base/Array";
 import Option "mo:base/Option";
@@ -23,19 +24,18 @@ import Time "mo:base/Time";
 import Deque "mo:base/Deque";
 import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
-import Trie "mo:base/Trie";
-import CyclesWallet "./lib/icl/CyclesWallet";
-import Types "./lib/icl/DRC20";
-import AID "./lib/icl/AID";
-import Hex "./lib/icl/Hex";
-import Binary "./lib/icl/Binary";
-import SHA224 "./lib/icl/SHA224";
-import DRC202 "./lib/icl/DRC202";
-import ICPubSub "./lib/icl/ICPubSub";
-import DIP20 "./lib/icl/DIP20";
-import ICRC1 "./lib/icl/ICRC1";
-// import DRC204 "./lib/icl/DRC204";
-import DRC207 "./lib/icl/DRC207";
+import Types "mo:icl/DRC20";
+import ICTokens "mo:icl/ICTokens";
+import AID "mo:icl/AID";
+import Hex "mo:icl/Hex";
+import Binary "mo:icl/Binary";
+import SHA224 "mo:sha224/SHA224";
+import DRC202 "mo:icl/DRC202";
+import ICPubSub "mo:icl/ICPubSub";
+import DIP20 "mo:icl/DIP20";
+import ICRC1 "mo:icl/ICRC1";
+// import DRC204 "./lib/DRC204";
+import DRC207 "mo:icl/DRC207";
 
 //record { totalSupply=0; decimals=18; fee=100000000000; name=opt "icETH (Test)"; symbol=opt "icETHTest"; metadata=null; founder=null;}  
 shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
@@ -68,7 +68,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     type Nonce = Nat;
     type Data = Blob;
     type Timeout = Nat32;
-    type Config = Types.Config;
+    type Config = ICTokens.Config;
 
     /*
     * Config 
