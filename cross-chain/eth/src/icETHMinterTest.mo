@@ -3615,6 +3615,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public shared(msg) func resetNonce(_arg: {#latest; #pending}) : async Nonce{
         // WARNING: Don't reset nonce when the system is sending transactions normally.
         assert(_onlyOwner(msg.caller));
+        assert(not(_notPaused()));
         let mainAccountId = _accountId(Principal.fromActor(this), null);
         let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccountId);
         let nonce = await* _fetchAccountNonce(mainAddress, _arg);
@@ -3667,6 +3668,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         // Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of block confirmations before calling this function after suspending the contract operation.
         // WARNING: If you want to attribute the surplus tokens to the FEE balance, you need to make sure all claim operations for the cross-chain transactions have been completed.
         assert(_onlyOwner(msg.caller));
+        assert(not(_notPaused()));
         assert(_ictcAllDone());
         let tokenId = _toLower(Option.get(_token, eth_));
         let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
