@@ -77,7 +77,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     private stable var NonceStartBase: Nat = 10000000;
     private stable var NonceMode: Nat = 0; // Nonce mode is turned on when there is not enough storage space or when the nonce value of a single user exceeds `NonceStartBase`.
     private stable var AllowanceLimit: Nat = 50;
-    private let MAX_MEMORY: Nat = 23*1024*1024*1024; // 23G
+    private let MAX_MEMORY: Nat = 2*1000*1000*1000; // 2G
 
     /* 
     * State Variables 
@@ -1153,7 +1153,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
         switch(drc202.get(_txid)){
             case(?(txn)){ return ?txn; };
             case(_){
-                return await drc202.get2(Principal.fromActor(this), _txid);
+                return await* drc202.get2(Principal.fromActor(this), _txid);
             };
         };
     };
@@ -1250,7 +1250,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
                     if (_isSpender){ #TransferFromErr(#CreatedInFuture({ ledger_time = Nat64.fromIntWrap(Time.now()) })) } 
                     else { #TransferErr(#CreatedInFuture({ ledger_time = Nat64.fromIntWrap(Time.now()) })) };
                 }else{
-                    let events = drc202.getEvents(?caller);
+                    let events = drc202.getEvents(?caller, null, null).0;
                     switch(Array.find(events, func (txn: TxnRecord): Bool{
                         txn.timestamp + PERMITTED_DRIFT >= Time.now() and txn.timestamp <= Time.now() + PERMITTED_DRIFT and 
                         txn.caller == caller and txn.transaction.from == _from and txn.transaction.to == _to and txn.transaction.value == _value and txn.transaction.data == _data
@@ -1678,8 +1678,19 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     /// returns events
     public query func drc202_events(_account: ?DRC202.Address) : async [DRC202.TxnRecord]{
         switch(_account){
-            case(?(account)){ return drc202.getEvents(?_getAccountId(account)); };
-            case(_){return drc202.getEvents(null);}
+            case(?(account)){ return drc202.getEvents(?_getAccountId(account), null, null).0; };
+            case(_){return drc202.getEvents(null, null, null).0;}
+        };
+    };
+    /// returns events filtered by time
+    public query func drc202_events_filter(_account: ?DRC202.Address, _startTime: ?Time.Time, _endTime: ?Time.Time) : async (data: [DRC202.TxnRecord], mayHaveArchived: Bool){
+        switch(_account){
+            case(?(account)){ 
+                return drc202.getEvents(?_getAccountId(account), _startTime, _endTime);
+            };
+            case(_){
+                return drc202.getEvents(null, _startTime, _endTime);
+            }
         };
     };
     /// returns txn record. It's an query method that will try to find txn record in token canister cache.
@@ -1691,7 +1702,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
         switch(drc202.get(_txid)){
             case(?(txn)){ return ?txn; };
             case(_){
-                return await drc202.get2(Principal.fromActor(this), _txid);
+                return await* drc202.get2(Principal.fromActor(this), _txid);
             };
         };
     };
