@@ -56,6 +56,8 @@ import Hex "mo:icl/Hex";
 import CyclesMonitor "mo:icl/CyclesMonitor";
 import KYT "mo:icl/KYT";
 import ICEvents "mo:icl/ICEvents";
+import DRC20 "mo:icl/DRC20";
+import ICTokens "mo:icl/ICTokens";
 
 // InitArgs = {
 //     retrieve_btc_min_amount : Nat64; // 10000
@@ -65,7 +67,7 @@ import ICEvents "mo:icl/ICEvents";
 //     dex_pair: ?Principal;
 //     mode: Mode;
 //   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3fwop-7iaaa-aaaak-adzca-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
+// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
 shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     // assert(initArgs.ecdsa_key_name == "key_1"); 
     // assert(initArgs.btc_network == #Mainnet); 
@@ -114,9 +116,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     let ICTC_RUN_INTERVAL : Nat = 10;
     let MIN_VISIT_INTERVAL : Nat = 30; //seconds
     let AVG_TX_BYTES : Nat64 = 450; /*config*/
+    let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     
     private var app_debug : Bool = true; /*config*/
-    private let version_: Text = "0.2.2"; /*config*/
+    private let version_: Text = "0.2.3"; /*config*/
     private let ns_: Nat = 1000000000;
     private var pause: Bool = initArgs.mode == #ReadOnly;
     private stable var owner: Principal = installMsg.caller;
@@ -124,10 +127,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private stable var icBTC_: Principal = initArgs.ledger_id; 
     private var ckFixedFee: Nat = initArgs.fixed_fee;
     private var ckDexPair: ?Principal = initArgs.dex_pair;
-    assert(icBTC_ == initArgs.ledger_id);
     if (app_debug){
         icBTC_ := Principal.fromText("3qr7c-6aaaa-aaaak-adzbq-cai");
     };
+    assert(icBTC_ == initArgs.ledger_id);
+    private var blackhole_: Text = "7hdtw-jqaaa-aaaak-aaccq-cai";
     private let sa_zero : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; // Main account
     private let sa_one : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]; // Fees account
     private let ic : ICBTC.Self = actor(Principal.toText(ic_));
@@ -1668,6 +1672,46 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             return (wasm.1, wasm.0.size());
         });
     };
+    public shared(msg) func launchToken(_args: {
+        totalSupply: ?Nat/*smallest_unit Token*/; 
+        ckTokenFee: Nat/*smallest_unit Token*/; 
+        ckTokenName: Text;
+        ckTokenSymbol: Text;
+        ckTokenDecimals: Nat8;
+    }) : async Principal{
+        assert(_onlyOwner(msg.caller));
+        let wasm = _getLatestIcrc1Wasm();
+        assert(wasm.0.size() > 0);
+        let account = {owner = Principal.fromActor(this); subaccount = null };
+        let ic: IC.Self = actor("aaaaa-aa");
+        Cycles.add(INIT_CKTOKEN_CYCLES);
+        let newCanister = await ic.create_canister({ settings = ?{
+            freezing_threshold = null;
+            controllers = ?[Principal.fromActor(this), Principal.fromText(blackhole_)];
+            memory_allocation = null;
+            compute_allocation = null;
+        } });
+        await ic.install_code({
+            arg = Blob.toArray(to_candid({ 
+                totalSupply = 0; 
+                decimals = _args.ckTokenDecimals; 
+                fee = _args.ckTokenFee; 
+                name = ?_args.ckTokenName; 
+                symbol = ?_args.ckTokenSymbol; 
+                metadata = null; 
+                founder = null;
+            }: DRC20.InitArgs, app_debug));
+            wasm_module = wasm.0;
+            mode = #install; // #reinstall; #upgrade; #install
+            canister_id = newCanister.canister_id;
+        });
+        //Set FEE_TO & Minter
+        let ictokens : ICTokens.Self = actor(Principal.toText(newCanister.canister_id));
+        ignore await ictokens.ictokens_config({feeTo = ?Tools.principalToAccountHex(Principal.fromActor(this), ?sa_one)});
+        ignore await ictokens.ictokens_addMinter(Principal.fromActor(this));
+        cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, newCanister.canister_id);
+        return newCanister.canister_id;
+    };
     public shared(msg) func setTokenLogo(_canisterId: Principal, _logo: Text): async Bool{
         assert(_onlyOwner(msg.caller));
         let token = actor(Principal.toText(_canisterId)) : actor{ 
@@ -1707,11 +1751,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 totalSupply = 0; 
                 decimals = decimals; 
                 fee = fee; 
-                name = name; 
-                symbol = symbol; 
+                name = ?name; 
+                symbol = ?symbol; 
                 metadata = null; 
                 founder = null;
-            }));
+            }: DRC20.InitArgs, app_debug));
             wasm_module = wasm;
             mode = #upgrade; // #reinstall; #upgrade; #install
             canister_id = _canisterId;

@@ -1,9 +1,10 @@
 /**
- * Module     : DRC20.mo (ICTokens version)
+ * Module     : DRC20.mo (ICTokens version), Compatible with ICRC1 and ICRC2
+                Modified from this version (https://github.com/iclighthouse/DRC_standards/tree/main/DRC20)
  * Author     : ICLighthouse Team
  * License    : Apache License 2.0
  * Stability  : Experimental
- * Github     : https://github.com/iclighthouse/DRC_standards/
+ * Github     : https://github.com/iclighthouse/icRouter
  */
 
 import Prim "mo:⛔";
@@ -34,11 +35,10 @@ import DRC202 "mo:icl/DRC202";
 import ICPubSub "mo:icl/ICPubSub";
 import DIP20 "mo:icl/DIP20";
 import ICRC1 "mo:icl/ICRC1";
-// import DRC204 "./lib/DRC204";
 import DRC207 "mo:icl/DRC207";
 
-//record { totalSupply=0; decimals=18; fee=100000000000; name=opt "icETH (Test)"; symbol=opt "icETHTest"; metadata=null; founder=null;}  
-shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
+//record { totalSupply=0; decimals=8; fee=100; name=opt "icBTC (PR) on IC"; symbol=opt "icBTC"; metadata=null; founder=null;}, true  
+shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = this {
     /*
     * Types 
     */
@@ -73,7 +73,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     /*
     * Config 
     */
-    private stable var FEE_TO: AccountId = AID.blackhole(); /*config*/
+    private stable var FEE_TO: AccountId = AID.blackhole(); 
     private stable var NonceStartBase: Nat = 10000000;
     private stable var NonceMode: Nat = 0; // Nonce mode is turned on when there is not enough storage space or when the nonce value of a single user exceeds `NonceStartBase`.
     private stable var AllowanceLimit: Nat = 50;
@@ -99,7 +99,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     private stable var allowances: Trie.Trie2D<AccountId, AccountId, Nat> = Trie.empty(); // Limit 50 records per account
     // private stable var cyclesBalances: Trie.Trie<AccountId, Nat> = Trie.empty();
     // Set EN_DEBUG=false in the production environment.
-    private var drc202 = DRC202.DRC202({EN_DEBUG = false; MAX_CACHE_TIME = 3 * 30 * 24 * 3600 * 1000000000; MAX_CACHE_NUMBER_PER = 100; MAX_STORAGE_TRIES = 2; }, standard_);
+    private var drc202 = DRC202.DRC202({EN_DEBUG = enDebug; MAX_CACHE_TIME = 3 * 30 * 24 * 3600 * 1000000000; MAX_CACHE_NUMBER_PER = 200; MAX_STORAGE_TRIES = 2; }, standard_);
     private stable var drc202_lastStorageTime : Time.Time = 0;
     private var pubsub = ICPubSub.ICPubSub<MsgType>({ MAX_PUBLICATION_TRIES = 2 }, func (t1:MsgType, t2:MsgType): Bool{ t1 == t2 });
     private stable var icps_lastPublishTime : Time.Time = 0;
@@ -1720,19 +1720,6 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
         return pubsub.config(config);
     };
 
-    // DRC204
-    // public shared(msg) func icdex_create() : async Principal{
-    //     assert(_onlyOwner(msg.caller));
-    //     let icdex_pair = await DRC204.icdex_create();
-    //     return icdex_pair;
-    // };
-    // public shared func drc204_pairs() : async [(Principal, (DRC204.SwapPair, Nat))]{
-    //     return await DRC204.getPairs(Principal.fromActor(this));
-    // };
-    // public query func drc204_router(): async Principal{
-    //     return Principal.fromText(DRC204.router);
-    // };
-
     /* 
     * Genesis
     */
@@ -1789,9 +1776,9 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs) = this {
     // };
 
     // upgrade (Compatible with the previous version)
-    private stable var __drc202Data: [DRC202.DataTemp] = [];
+    private stable var __drc202Data: [DRC202.DataTemp] = []; // @deprecated
     private stable var __drc202DataNew: ?DRC202.DataTemp = null;
-    private stable var __pubsubData: [ICPubSub.DataTemp<MsgType>] = [];
+    private stable var __pubsubData: [ICPubSub.DataTemp<MsgType>] = []; // @deprecated
     private stable var __pubsubDataNew: ?ICPubSub.DataTemp<MsgType> = null;
     system func preupgrade() {
         __drc202DataNew := ?drc202.getData();

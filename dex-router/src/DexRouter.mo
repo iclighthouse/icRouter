@@ -532,7 +532,7 @@ shared(installMsg) actor class DexRouter() = this {
     public shared(msg) func sync() : async (){ // sync fee
         assert(_onlyOwner(msg.caller));
         for ((canister, (pair,score)) in Trie.iter(pairs)){
-            let f = _syncFee(pair, score);
+            let r = await _syncFee(pair, score);
         };
     };
     //'(record{token0=record{principal "f2r76-wqaaa-aaaak-adpzq-cai"; "ITest"; variant{icrc1}}; token1=record{principal "f5qzk-3iaaa-aaaak-adpza-cai"; "DTest"; variant{drc20}}; dexName="icdex"; canisterId=principal "dklbo-qyaaa-aaaak-adqjq-cai"; feeRate=0.005}, 1)'
@@ -1219,27 +1219,26 @@ shared(installMsg) actor class DexRouter() = this {
                                 var count : Nat = 0;
                                 let pair: DRC205T.Impl = actor(Principal.toText(pairData.pair));
                                 if (pairData.data.size() > 0){
-                                    startTime := pairData.data[0].time;
+                                    startTime := pairData.data[0].time + 1;
                                     position := pairData.data[0].position;
                                     avgPrice := pairData.data[0].avgPrice;
                                 };
-                                let txs = await pair.drc205_events(?Hex.encode(Blob.toArray(account)));
+                                // let txs = await pair.drc205_events(?Hex.encode(Blob.toArray(account)));
+                                let (txs, hasMorePreData) = await pair.drc205_events_filter(?Hex.encode(Blob.toArray(account)), ?startTime, null); // Time DESC
                                 var filledTrades: [FilledTrade] = [];
-                                var firstTime: Int = 0;
                                 var lastTime = startTime;
                                 var txCount: Nat = 0;
-                                for (tx in txs.vals()){
+                                for (tx in Array.reverse(txs).vals()){
                                     txCount += 1;
                                     for (trade in tx.details.vals()){
-                                        firstTime := if (firstTime > 0) { Int.min(firstTime, trade.time) } else { trade.time };
-                                        if (trade.time > startTime){
+                                        if (trade.time >= startTime){
                                             lastTime := Int.max(lastTime, trade.time);
-                                            filledTrades := Tools.arrayAppend(filledTrades, [trade]);
+                                            filledTrades := Tools.arrayAppend(filledTrades, [trade]); // Time ASC
                                         };
                                     };
                                 };
                                 filledTrades := Array.sort(filledTrades, func (a:FilledTrade, b:FilledTrade): Order.Order{
-                                    Int.compare(a.time, b.time)
+                                    Int.compare(a.time, b.time) // Time ASC
                                 });
                                 for (trade in filledTrades.vals()){
                                     for (detail in _tradeParse(quoteToken, position, trade).vals()){
@@ -1278,8 +1277,8 @@ shared(installMsg) actor class DexRouter() = this {
                                     };
                                     _updateCompetitionTrader(roundId, account, pairData.pair, newStats);
                                 };
-                                // High Frequency Trader
-                                if (firstTime > 0 and pairData.data.size() > 0 and firstTime > startTime and txCount >= 100){
+                                // High Frequency Trader (txCount >= 500)
+                                if (pairData.data.size() > 0 and not(hasMorePreData) and txCount >= 500){
                                     await* _aggregateCompetitionTrader(roundId, account, true); // settle & drop competition
                                 };
                             };

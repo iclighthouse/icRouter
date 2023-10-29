@@ -133,7 +133,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 648000; /*config*/
     
     private var app_debug : Bool = true; /*config*/
-    private let version_: Text = "0.8.18"; /*config*/
+    private let version_: Text = "0.8.19"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private stable var minConfirmations : Nat = Option.get(initArgs.min_confirmations, 15);
@@ -3845,7 +3845,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 symbol = ?ckSymbol; 
                 metadata = null; 
                 founder = null;
-            }));
+            }: DRC20.InitArgs, app_debug));
             wasm_module = wasm.0;
             mode = #install; // #reinstall; #upgrade; #install
             canister_id = newCanister.canister_id;
@@ -3897,11 +3897,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 totalSupply = 0; 
                 decimals = decimals; 
                 fee = fee; 
-                name = name; 
-                symbol = symbol; 
+                name = ?name; 
+                symbol = ?symbol; 
                 metadata = null; 
                 founder = null;
-            }));
+            }: DRC20.InitArgs, app_debug));
             wasm_module = wasm;
             mode = #upgrade; // #reinstall; #upgrade; #install
             canister_id = _canisterId;

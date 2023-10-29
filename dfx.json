@@ -4,16 +4,12 @@
         "main": "./cross-chain/btc/src/icBTCMinterTest.mo",
         "type": "motoko"
       },
-      "icBTCTest": {
-        "main": "./cross-chain/btc/src/icBTCTest.mo",
-        "type": "motoko"
-      },
       "icBTCMinter": {
         "main": "./cross-chain/btc/src/icBTCMinter.mo",
         "type": "motoko"
       },
-      "icBTC": {
-        "main": "./cross-chain/btc/src/icBTC.mo",
+      "icToken": {
+        "main": "./icTokens/DRC20.mo",
         "type": "motoko"
       },
       "icETHMinter": {
@@ -26,14 +22,6 @@
       },
       "icETHMinterTest2": {
         "main": "./cross-chain/eth/src/icETHMinterTest.mo",
-        "type": "motoko"
-      },
-      "icETH": {
-        "main": "./cross-chain/eth/src/icETH.mo",
-        "type": "motoko"
-      },
-      "icETHTest": {
-        "main": "./cross-chain/eth/src/icETHTest.mo",
         "type": "motoko"
       },
       "Router": {
