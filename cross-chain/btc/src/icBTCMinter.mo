@@ -214,10 +214,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private func _addAccountUtxos(_address: Address, _pubkey: PubKey, _dpath: DerivationPath, _utxos: [Utxo]) : (){
         switch(Trie.get(accountUtxos, keyt(_address), Text.equal)){
             case(?(item)){
-                var utxos = _utxos;
-                if (item.2.size() < 5000){
-                    utxos := Tools.arrayAppend(utxos, item.2);
+                var preUtxos = item.2;
+                if (preUtxos.size() > 2000){
+                    preUtxos := Tools.slice(preUtxos, 0, ?1999);
                 };
+                let utxos = Tools.arrayAppend(_utxos, preUtxos);
                 accountUtxos := Trie.put(accountUtxos, keyt(_address), Text.equal, (_pubkey, _dpath, utxos)).0;
             };
             case(_){
@@ -1151,7 +1152,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         // nativeBalance >= minterBalance
         // nativeBalance >= ckTotalSupply
         // minterBalance >= ckTotalSupply - ckFeeBalance
-        if (_noOrderInICTC() and nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100){ /*config*/
+        if (_noOrderInICTC() and (nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100)){ /*config*/
             pause := true;
             ignore _putEvent(#suspend({message = ?"The pool account balance does not match and the system is suspended and pending DAO processing."}), ?_accountId(Principal.fromActor(this), null));
         };

@@ -28,6 +28,10 @@
         "main": "./dex-router/src/DexRouter.mo",
         "type": "motoko"
       },
+      "RouterMain": {
+        "main": "./dex-router/src/DexRouter.mo",
+        "type": "motoko"
+      },
       "RouterTest": {
         "main": "./dex-router/src/DexRouter.mo",
         "type": "motoko"

@@ -1360,7 +1360,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let ckFeetoBalance = await ckLedger.icrc1_balance_of({owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_one) });
         let minterBalance = _getBalance(mainAccount, tokenId);
         if (_enPause and _ictcAllDone()
-        and nativeBalance < Nat.sub(ckTotalSupply, ckFeetoBalance) * 98 / 100 or nativeBalance < minterBalance * 95 / 100){ /*config*/
+        and (nativeBalance < Nat.sub(ckTotalSupply, ckFeetoBalance) * 98 / 100 or nativeBalance < minterBalance * 95 / 100)){ /*config*/
             paused := true;
             ignore _putEvent(#suspend({message = ?"The pool account balance does not match and the system is suspended and pending DAO processing."}), ?_accountId(Principal.fromActor(this), null));
         };
