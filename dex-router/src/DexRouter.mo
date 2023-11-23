@@ -89,7 +89,7 @@ shared(installMsg) actor class DexRouter() = this {
         ROUTING_FEE: Nat = 10000000; // token
         DEFAULT_VOLATILITY_LIMIT: Nat = 10; //%
     };
-    private let version_: Text = "0.8";
+    private let version_: Text = "0.8.1";
     private let swapCyclesInit: Nat = 1_000_000_000_000; 
     private let ic: IC.Self = actor("aaaaa-aa");
     private let usd_decimals: Nat = 18;
@@ -1278,7 +1278,7 @@ shared(installMsg) actor class DexRouter() = this {
                                     _updateCompetitionTrader(roundId, account, pairData.pair, newStats);
                                 };
                                 // High Frequency Trader (txCount >= 500)
-                                if (pairData.data.size() > 0 and not(hasMorePreData) and txCount >= 500){
+                                if (pairData.data.size() > 0 and hasMorePreData and txCount >= 500){
                                     await* _aggregateCompetitionTrader(roundId, account, true); // settle & drop competition
                                 };
                             };
@@ -1292,11 +1292,11 @@ shared(installMsg) actor class DexRouter() = this {
         };
     };
 
-    public shared(msg) func pushCompetitionByDex(_id: ?Nat, _name: Text, _content: Text, _start: Time.Time, _end: Time.Time, _pairs: [(DexName, Principal, {#token0; #token1})]) : async Nat{
+    public shared(msg) func pushCompetitionByDex(_id: ?Nat, _name: Text, _content: Text, _start: Time.Time, _end: Time.Time, _addPairs: [(DexName, Principal, {#token0; #token1})]) : async Nat{
         assert(_onlyDexList(msg.caller));
         let hostedDexName = _getDexName(msg.caller);
         var pairs: [(DexName, Principal, {#token0;#token1})] = [];
-        for ((dex, pair, quoteToken) in _pairs.vals()){
+        for ((dex, pair, quoteToken) in _addPairs.vals()){
             if (_inDexList(dex) and _onlyPair(pair)){
                 pairs := Tools.arrayAppend(pairs, [(dex, pair, quoteToken)]);
             };
@@ -1307,10 +1307,10 @@ shared(installMsg) actor class DexRouter() = this {
                     case(?(competition)){
                         dexCompetitions := Trie.put(dexCompetitions, keyn(id), Nat.equal, {
                             hostedDex = hostedDexName;
-                            name = _name;
-                            content = _content;
-                            start = _start;
-                            end = _end;
+                            name = (if (Text.size(_name) > 0){ _name }else{ competition.name });
+                            content = (if (Text.size(_content) > 0){ _content }else{ competition.content });
+                            start = (if (_start > 0){ _start }else{ competition.start });
+                            end = (if (_end > 0){ _end }else{ competition.end });
                             pairs = pairs
                         }).0;
                     };

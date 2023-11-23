@@ -126,7 +126,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     * ck
     */
     private stable var minters: [Principal] = []; // [owner]  //ck
-    private func _onlyMiner(_caller: Principal) : Bool { //ck
+    private func _onlyMinter(_caller: Principal) : Bool { //ck
         return Option.isSome(Array.find(minters, func (t: Principal): Bool{ t == _caller }));
     };
     
@@ -440,7 +440,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let value = _value; 
         var gas: Gas = #token(fee_);
         var allowed: Nat = 0; // *
-        var spendValue = _value; // *
+        var spendValue = _value + fee_; // *
         if (_isAllowance){
             allowed := _getAllowance(from, caller);
         };
@@ -467,7 +467,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         };
         var txn: TxnRecord = {
             txid = txid;
-            msgCaller = null; // If you want to maintain anonymity, you can hide the principal of the caller
+            msgCaller = null; 
             caller = caller;
             timestamp = Time.now();
             index = index;
@@ -525,7 +525,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
                 };
             };
             case(#lockTransfer(operation)){
-                spendValue := operation.locked;
+                spendValue := operation.locked + fee_;
                 if (not(_lock(from, operation.locked, true))){
                     return #err({ code=#InsufficientBalance; message="Insufficient Balance"; });
                 } else if (_isAllowance and (allowed < spendValue or allowed == 0)){
@@ -1315,7 +1315,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     public shared(msg) func icrc1_transfer(_args: TransferArgs) : async ({ #Ok: Nat; #Err: TransferError; }) { //ck
         switch(_args.fee){
             case(?(icrc1_fee)){
-                if (icrc1_fee < fee_ and not(_onlyMiner(msg.caller))){ return #Err(#BadFee({ expected_fee = fee_ })) };
+                if (icrc1_fee < fee_ and not(_onlyMinter(msg.caller))){ return #Err(#BadFee({ expected_fee = fee_ })) };
             };
             case(_){};
         };
@@ -1325,7 +1325,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let value = _args.amount;
         let data = _args.memo;
         var res: TxnResult = #ok(Blob.fromArray([]));
-        if (_onlyMiner(msg.caller) and to == _getAccountIdFromPrincipal(msg.caller, null)){ // burn
+        if (_onlyMinter(msg.caller) and to == _getAccountIdFromPrincipal(msg.caller, null)){ // burn
             let operation: Operation = #transfer({ action = #burn; });
             let balance = _getBalance(from);
             var gasToken = fee_;
@@ -1338,7 +1338,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
                 //     case(#err(v)){};
                 // };
             };
-        }else if (_onlyMiner(msg.caller) and _args.from_subaccount == null){ // mint
+        }else if (_onlyMinter(msg.caller) and _args.from_subaccount == null){ // mint
             let operation: Operation = #transfer({ action = #mint; });
             res := _transfer(msg.caller, sub, from, to, value, null, data, operation, false);
         }else{ // transfer
@@ -1619,7 +1619,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         return minters;
     };
     public shared(msg) func ictokens_mint(_to: Address, _value: Amount, _nonce: ?Nonce, _data: ?Data) : async (result: TxnResult) { //ck
-        assert(_onlyMiner(msg.caller));
+        assert(_onlyMinter(msg.caller));
         assert(_validateMaxSupply(_value));
         let from = AID.blackhole();
         let to = _getAccountId(_to);

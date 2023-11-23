@@ -53,6 +53,8 @@ import ICDex "mo:icl/ICDexTypes";
 import KYT "mo:icl/KYT";
 import CyclesMonitor "mo:icl/CyclesMonitor";
 import RpcCaller "lib/RpcCaller";
+import RpcRequest "lib/RpcRequest";
+import Backup "lib/BackupTypes";
 
 // Rules:
 //      When depositing ETH, each account is processed in its own single thread.
@@ -70,7 +72,7 @@ import RpcCaller "lib/RpcCaller";
 // 5. launchToken() 
 // 6. setTokenDexPair() 
 // Production confirmations: 65 - 96
-// "Ethereum", "ETH", 18, 12, record{min_confirmations=opt 15; rpc_confirmations = 2; utils_canister_id = principal "s6moc-4aaaa-aaaak-aelma-cai"; deposit_method=3}
+// "Ethereum", "ETH", 18, 12, record{min_confirmations=opt 72; rpc_confirmations = 4; utils_canister_id = principal "qphl7-qqaaa-aaaar-qacba-cai"; deposit_method=3}
 shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs) = this {
     assert(Option.get(initArgs.min_confirmations, 0) >= 10); /*config*/
 
@@ -130,10 +132,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let MIN_VISIT_INTERVAL : Nat = 6; //seconds
     // let GAS_PER_BYTE : Nat = 68; // gas
     let MAX_PENDING_RETRIEVALS : Nat = 50; /*config*/
-    let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 648000; /*config*/
+    let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 648000; // 90 days
     
     private var app_debug : Bool = true; /*config*/
-    private let version_: Text = "0.8.19"; /*config*/
+    private let version_: Text = "0.8.20"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private stable var minConfirmations : Nat = Option.get(initArgs.min_confirmations, 15);
@@ -158,9 +160,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private var blackhole_: Text = "7hdtw-jqaaa-aaaak-aaccq-cai";
     private stable var icrc1WasmHistory: [(wasm: [Nat8], version: Text)] = [];
 
-    private stable var countMinting: Wei = 0;
+    private stable var countMinting: Nat = 0;
     private stable var totalMinting: Wei = 0; // ETH
-    private stable var countRetrieval: Wei = 0;
+    private stable var countRetrieval: Nat = 0;
     private stable var totalRetrieval: Wei = 0; // ETH
     private stable var latestVisitTime = Trie.empty<Principal, Timestamp>(); 
     private stable var accounts = Trie.empty<AccountId, (EthAddress, Nonce)>(); 
@@ -185,7 +187,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private var getTokenPriceIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {4 * 3600};/*config*/
     private stable var lastConvertFeesTime: Timestamp = 0;
     private var convertFeesIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {8 * 3600};/*config*/
-    private stable var lastHealthinessSlotTime: Timestamp = 0;
+    // private stable var lastHealthinessSlotTime: Timestamp = 0;
     private var healthinessIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {7 * 24 * 3600};/*config*/
     private stable var countRejections: Nat = 0;
     private stable var lastExecutionDuration: Int = 0;
@@ -205,6 +207,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private stable var    rpcRequestId: RpcRequestId = 0;
     private stable var    firstRpcRequestId: RpcRequestId = 0;
     private stable var ck_rpcRequests = Trie.empty<RpcRequestId, RpcRequestConsensus>(); 
+    private stable var ck_rpcRequestConsensusTemps = Trie.empty<RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp)>(); 
 
     // KYT (TODO)
     private stable var kyt_accountAddresses: KYT.AccountAddresses = Trie.empty(); 
@@ -786,20 +789,20 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     //         case(_){};
     //     };
     // };
-    private func _setEthNonce(_a: AccountId, _nonce: Nonce): (){
-        switch(Trie.get(accounts, keyb(_a), Blob.equal)){
-            case(?(account, nonce)){ 
-                accounts := Trie.put(accounts, keyb(_a), Blob.equal, (account, _nonce)).0; 
-            };
-            case(_){};
-        };
-    };
-    private func _getEthNonce(_a: AccountId): Nonce{
-        switch(Trie.get(accounts, keyb(_a), Blob.equal)){
-            case(?(account, nonce)){ return nonce; };
-            case(_){ return 0; };
-        };
-    };
+    // private func _setEthNonce(_a: AccountId, _nonce: Nonce): (){
+    //     switch(Trie.get(accounts, keyb(_a), Blob.equal)){
+    //         case(?(account, nonce)){ 
+    //             accounts := Trie.put(accounts, keyb(_a), Blob.equal, (account, _nonce)).0; 
+    //         };
+    //         case(_){};
+    //     };
+    // };
+    // private func _getEthNonce(_a: AccountId): Nonce{
+    //     switch(Trie.get(accounts, keyb(_a), Blob.equal)){
+    //         case(?(account, nonce)){ return nonce; };
+    //         case(_){ return 0; };
+    //     };
+    // };
     private func _getRpcUrl(_offset: Nat) : (keeper: AccountId, url: Text, total:Nat){
         let rpcs = Array.filter(Iter.toArray(Trie.iter<AccountId, RpcProvider>(ck_rpcProviders)), func (t: (AccountId, RpcProvider)): Bool{
             t.1.status == #Available;
@@ -882,16 +885,21 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var balance = _getFeeBalance(_tokenId);
         balance += _amount;
         let tokenId = Blob.fromArray(_getEthAccount(_tokenId));
-        if (_amount > 0){
+        if (balance > 0){
             feeBalances := Trie.put(feeBalances, keyb(tokenId), Blob.equal, balance).0;
         };
         return balance;
     };
     private func _subFeeBalance(_tokenId: EthAddress, _amount: Wei): (balance: Wei){
         var balance = _getFeeBalance(_tokenId);
-        balance -= _amount;
+        if (balance >= _amount){
+            balance -= _amount;
+        }else{
+            // Do a check on the account funds before deducting them.
+            Prelude.unreachable();
+        };
         let tokenId = Blob.fromArray(_getEthAccount(_tokenId));
-        if (_amount > 0){
+        if (balance > 0){
             feeBalances := Trie.put(feeBalances, keyb(tokenId), Blob.equal, balance).0;
         }else{
             feeBalances := Trie.remove(feeBalances, keyb(tokenId), Blob.equal).0;
@@ -935,7 +943,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private func _subBalance(_account: Account, _tokenId: EthAddress, _amount: Wei): (balance: Wei){
         let accountId = _accountId(_account.owner, _account.subaccount);
         var balance = _getBalance(_account, _tokenId);
-        balance -= _amount;
+        if (balance >= _amount){
+            balance -= _amount;
+        }else{
+            // Do a check on the account funds before deducting them. Theoretically, the pool account is sufficient to go through the deduction.
+            Prelude.unreachable();
+        };
         let tokenId = Blob.fromArray(_getEthAccount(_tokenId));
         if (balance > 0){
             balances := Trie.put2D(balances, keyb(accountId), Blob.equal, keyb(tokenId), Blob.equal, (_account, balance));
@@ -984,6 +997,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     }; 
     private func _removeRetrievingTxIndex(_txi: TxIndex) : (){
         pendingRetrievals := List.filter(pendingRetrievals, func (t: TxIndex): Bool{ t != _txi });
+    };
+    private func _isRetrieving(_txi: TxIndex) : Bool{
+        return Option.isSome(List.find(pendingRetrievals, func (t: TxIndex): Bool{ t == _txi }));
     };
     private func _getPendingDepositTxn(_txHash: TxHash) : ?Minter.PendingDepositTxn{
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
@@ -1054,11 +1070,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         return Trie.get(depositTxns, keyb(txHash), Blob.equal);
     };
-    private func _isExistedTxn(_txHash: TxHash) : Bool{
-        let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
-        return Option.isSome(Trie.get(depositTxns, keyb(txHash), Blob.equal)) or 
-        Option.isSome(Trie.get(pendingDepositTxns, keyb(txHash), Blob.equal));
-    };
+    // private func _isExistedTxn(_txHash: TxHash) : Bool{
+    //     let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
+    //     return Option.isSome(Trie.get(depositTxns, keyb(txHash), Blob.equal)) or 
+    //     Option.isSome(Trie.get(pendingDepositTxns, keyb(txHash), Blob.equal));
+    // };
     private func _isPendingTxn(_txHash: TxHash) : Bool{
         // if (not(_isExistedTxn(_txHash))){
         //     return false;
@@ -1262,9 +1278,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _convertFees(): async* (){
-        let mainAccount = {owner = Principal.fromActor(this); subaccount = null};
-        let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-        let feeTempAccount = {owner = Principal.fromActor(this); subaccount = ?sa_two};
+        let mainAccount: Account = {owner = Principal.fromActor(this); subaccount = null};
+        let feeAccount: Account = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+        let feeTempAccount: Account = {owner = Principal.fromActor(this); subaccount = ?sa_two};
         let eth = _getCkTokenInfo(eth_);
         let quote = _getCkTokenInfo(quoteToken);
         if (_now() >= lastConvertFeesTime + convertFeesIntervalSeconds){
@@ -1282,7 +1298,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             let amount = Nat.sub(balance, ckTokenFee);
                             switch(await* _sendCkToken2(tokenId, Blob.fromArray(sa_one), {owner = feeTempAccount.owner; subaccount = _toSaBlob(feeTempAccount.subaccount)}, amount)){
                                 case(#Ok(blockNum)){
-                                    ignore _subFeeBalance(tokenId, balance);
+                                    let mainFeeBalance = _getFeeBalance(tokenId);
+                                    ignore _subFeeBalance(tokenId, Nat.min(mainFeeBalance, balance));
                                     ignore _addBalance(mainAccount, tokenId, amount);
                                 };
                                 case(#Err(e)){};
@@ -1306,8 +1323,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                         // tranfer fee to feeTempAccount
                                         switch(await* _sendCkToken2(tokenId, Blob.fromArray(sa_one), {owner = feeTempAccount.owner; subaccount = _toSaBlob(feeTempAccount.subaccount)}, amount)){
                                             case(#Ok(blockNum)){
-                                                ignore _subFeeBalance(tokenId, balance);
-                                                ignore _addBalance(mainAccount, tokenId, amount);
+                                                let mainFeeBalance = _getFeeBalance(tokenId);
+                                                ignore _subFeeBalance(tokenId, Nat.min(mainFeeBalance, balance));
+                                                    ignore _addBalance(mainAccount, tokenId, amount);
                                             };
                                             case(#Err(e)){};
                                         };
@@ -1342,7 +1360,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 let feeAmount = Nat.sub(feeBalance, ckTokenFee);
                 switch(await* _sendCkToken2(eth_, Blob.fromArray(sa_two), {owner = feeAccount.owner; subaccount = _toSaBlob(feeAccount.subaccount)}, feeAmount)){
                     case(#Ok(blockNum)){
-                        ignore _subBalance(mainAccount, eth_, feeBalance);
+                        let mainBalance = _getBalance(mainAccount, eth_);
+                        ignore _subBalance(mainAccount, eth_, Nat.min(mainBalance, feeBalance));
                         ignore _addFeeBalance(eth_, feeAmount);
                     };
                     case(#Err(e)){};
@@ -1352,7 +1371,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     private func _getMinterBalance(_token: ?EthAddress, _enPause: Bool) : async* Minter.BalanceStats{
         let tokenId = _toLower(Option.get(_token, eth_));
-        let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
+        let mainAccount: Account = {owner = Principal.fromActor(this); subaccount = null };
         let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(mainAccount.owner, mainAccount.subaccount));
         let nativeBalance = await* _fetchBalance(tokenId, mainAddress, true);
         let ckLedger = _getCkLedger(tokenId);
@@ -1504,7 +1523,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
                             ignore _addFeeBalance(tx.tokenId, feeDiff);
                             ignore _mintCkToken(tx.tokenId, feeAccount, feeDiff, ?_txi);
-                            ignore _subFeeBalance(eth_, feeDiffEth);
+                            let mainFeeBalance = _getFeeBalance(eth_);
+                            ignore _subFeeBalance(eth_, Nat.min(mainFeeBalance, feeDiffEth));
                             ignore _burnCkToken(eth_, Blob.fromArray(sa_one), feeDiffEth, feeAccount);
                         };
                         // ICTC
@@ -1641,7 +1661,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let id = rpcId;
         let input = "{\"jsonrpc\":\"2.0\",\"method\":\""# _methodName #"\",\"params\": "# _params #",\"id\":"# Nat.toText(id) #"}";
         rpcId += 1;
-        _preRpcLog(id, _rpcUrl, input);
+        ck_rpcLogs := RpcRequest.preRpcLog(ck_rpcLogs, id, _rpcUrl, input);
         Cycles.add(RPC_AGENT_CYCLES);
         // let res = await rpc.json_rpc(input, _responseSize, #url_with_api_key(_rpcUrl));
         try{
@@ -1655,12 +1675,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let minConfirmationNum : Nat = _minRpcRequests;
         var jsons: [Text] = [];
         func _request(keeper: AccountId, rpcUrl: Text, requestId: Nat): async* RpcFetchLog{
-            var logId : RpcId = rpcId;
+            var logId : RpcId = 0;
             var result: Text = "";
             var values: [Value] = [];
             var error: Text = "";
             var status: RpcRequestStatus = #pending; // {#pending; #ok: [Value]; #err: Text};
             try{
+                logId := rpcId;
                 let (id, res) = await* _fetchEthCall(rpcUrl, _methodName, _params, _responseSize, requestId);
                 logId := id;
                 switch(res){
@@ -1700,7 +1721,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 };
                             };
                         };
-                        _postRpcLog(id, ?r, ?error);
+                        ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, ?r, ?error);
                         if (error.size() == 0){
                             status := #ok(values);
                         }else{
@@ -1715,17 +1736,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         };
                     };
                     case(#Err(e)){
-                        _postRpcLog(id, null, ?e);
+                        ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, null, ?e);
                         throw Error.reject(e);
                     };
                 };
-                _updateRpcProviderStats(keeper, true);
+                ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
             }catch(e){
                 error := Error.message(e);
                 if (Text.contains(error, #text "Returns error:")){ 
-                    _updateRpcProviderStats(keeper, true);
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
                 }else{
-                    _updateRpcProviderStats(keeper, false);
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, false);
                 };
                 status := #err(error);
             };
@@ -1739,10 +1760,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var i : Nat = 0;
         var requestStatus: RpcRequestStatus = #pending;
         while(not(isConfirmed) and i < size){
-            let (keeper, rpcUrl, size) = _getRpcUrl(offset + i);
+            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.treeSegIndex(i, size));
             i += 1;
             let log = await* _request(keeper, rpcUrl, requestId);
-            let status_ = _putRpcRequestLog(requestId, log, minConfirmationNum);
+            let (data1, data2, status_) = RpcRequest.putRpcRequestLog(ck_rpcRequests, ck_rpcRequestConsensusTemps, requestId, log, minConfirmationNum);
+            ck_rpcRequests := data1;
+            ck_rpcRequestConsensusTemps := data2;
             requestStatus := status_;
             switch(requestStatus){
                 case(#ok(v)){ isConfirmed := true };
@@ -1788,19 +1811,33 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ck_chainId := await* _fetchNumber("eth_chainId", params, 1000, minRpcRequests, "result");
         return ck_chainId;
     };
+    // The reason minRpcRequests is set to 2 is that getting the wrong gasPrice does not cause fund to be lost.
     private func _fetchGasPrice() : async* Nat {
-        let minRpcRequests : Nat = 1;
         let params = "[]";
-        let value = await* _fetchNumber("eth_gasPrice", params, 1000, minRpcRequests, "result");
-        ck_gasPrice := value * 115 / 100 + 100000000; 
+        let value1 = await* _fetchNumber("eth_gasPrice", params, 1000, 1, "result");
+        let value2 = await* _fetchNumber("eth_gasPrice", params, 1000, 1, "result");
+        ck_gasPrice := (value1 + value2) / 2 * 115 / 100 + 100000000; 
         lastGetGasPriceTime := _now();
         return ck_gasPrice;
     };
     private func _fetchBlockNumber() : async* Nat{
-        let minRpcRequests : Nat = 1;
+        let minRpcRequests : Nat = Nat.max(2, minRpcConfirmations);
         let params = "[]";
-        let value = await* _fetchNumber("eth_blockNumber", params, 1000, minRpcRequests, "result");
-        if (value >= ck_ethBlockNumber.0){
+        var value: Nat = 0;
+        var confirmations: Nat = 0;
+        var i: Nat = 0;
+        while (confirmations < minRpcRequests and i < minRpcRequests * 2){
+            let v = await* _fetchNumber("eth_blockNumber", params, 1000, 1, "result");
+            if (value == 0){
+                value := v;
+                confirmations += 1;
+            }else if (v >= Nat.sub(value, 1) and v <= value + 2){
+                value := Nat.max(value, v);
+                confirmations += 1;
+            };
+            i += 1;
+        };
+        if (value >= ck_ethBlockNumber.0 and confirmations >= minRpcRequests){
             ck_ethBlockNumber := (value, _now());
         }else{
             throw Error.reject("BlockNumber is wrong!");
@@ -1808,7 +1845,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return ck_ethBlockNumber.0;
     };
     private func _fetchAccountNonce(_address: EthAddress, _blockNumber:{#latest; #pending;}) : async* Nonce{
-        let minRpcRequests : Nat = 1;
+        let minRpcRequests : Nat = minRpcConfirmations;
         var blockNumber: Text = ABI.natToHex(Nat.sub(_getBlockNumber(), minConfirmations));
         switch(_blockNumber){
             case(#latest){ blockNumber := "latest" };
@@ -1851,12 +1888,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let minRpcRequests : Nat = 1;
         var possibleResult: Text = "";
         func _request(keeper: AccountId, rpcUrl: Text, requestId: Nat): async* RpcFetchLog{
-            var logId : RpcId = rpcId;
+            var logId : RpcId = 0;
             var result: Text = "";
             var values: [Value] = [];
             var error: Text = "";
             var status: RpcRequestStatus = #pending; // {#pending; #ok: [Value]; #err: Text};
             try{
+                logId := rpcId;
                 let (id, res) = await* _fetchEthCall(rpcUrl, _methodName, _params, _responseSize, requestId);
                 logId := id;
                 switch(res){
@@ -1864,7 +1902,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         result := r;
                         switch(ETHCrypto.getBytesFromJson(r, _jsonPath)){ //*
                             case(?(value)){ 
-                                _postRpcLog(id, ?r, null);
+                                ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, ?r, null);
                                 values := [#Raw(value)];
                                 status := #ok(values);
                                 possibleResult := ABI.toHex(value); //*
@@ -1872,11 +1910,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             case(_){
                                 switch(ETHCrypto.getStringFromJson(r, "error/message")){
                                     case(?(value)){ 
-                                        _postRpcLog(id, null, ?("Returns error: "# value));
+                                        ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, null, ?("Returns error: "# value));
                                         throw Error.reject("Returns error: "# value);
                                     }; 
                                     case(_){
-                                        _postRpcLog(id, null, ?"Error in parsing json");
+                                        ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, null, ?"Error in parsing json");
                                         throw Error.reject("Error in parsing json");
                                     };
                                 };
@@ -1884,28 +1922,28 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         };
                     };
                     case(#Err(e)){ //*
-                        _postRpcLog(id, null, ?e);
+                        ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, null, ?e);
                         throw Error.reject(e);
                     };
                 };
-                _updateRpcProviderStats(keeper, true);
+                ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
             }catch(e){
                 error := Error.message(e);
                 if (Text.contains(error, #text "no consensus was reached") or Text.contains(error, #text "already known")){ 
-                    _updateRpcProviderStats(keeper, true);
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
                     values := [#Text(error)];
                     status := #ok(values);
                     if (possibleResult.size() == 0){
                         possibleResult := error;
                     };
                 }else if (Text.contains(error, #text "nonce too low")){ 
-                    _updateRpcProviderStats(keeper, true); // Not rpc node failure
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true); // Not rpc node failure
                     status := #err("Not sure if it has been successful: " # error);
                 }else if (Text.contains(error, #text "Returns error:")){ 
-                    _updateRpcProviderStats(keeper, true); 
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true); 
                     status := #err(error);
                 }else{
-                    _updateRpcProviderStats(keeper, false);
+                    ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, false);
                     status := #err(error);
                 };
             };
@@ -1919,10 +1957,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var i : Nat = 0;
         var requestStatus: RpcRequestStatus = #pending;
         while(not(isConfirmed) and i < size){
-            let (keeper, rpcUrl, size) = _getRpcUrl(offset + i);
+            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.treeSegIndex(i, size));
             i += 1;
             let log = await* _request(keeper, rpcUrl, requestId);
-            requestStatus := _putRpcRequestLog(requestId, log, minRpcRequests);
+            let (data1, data2, status_) = RpcRequest.putRpcRequestLog(ck_rpcRequests, ck_rpcRequestConsensusTemps, requestId, log, minRpcRequests);
+            ck_rpcRequests := data1;
+            ck_rpcRequestConsensusTemps := data2;
+            requestStatus := status_;
             switch(requestStatus){
                 case(#ok(v)){ isConfirmed := true };
                 case(_){};
@@ -2018,7 +2059,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _fetchERC20Metadata(_tokenId: EthAddress): async* {symbol: Text; decimals: Nat8 }{
-        let minRpcRequests : Nat = 1;
+        let minRpcRequests : Nat = minRpcConfirmations;
         let blockNumber: Text = "latest";
         let mainAccoundId = _accountId(Principal.fromActor(this), null);
         let (mainAddress, mainNonce) = await* _getEthAddress(mainAccoundId, false);
@@ -2150,7 +2191,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let icrc1: ICRC1.Self = actor(Principal.toText(token.ckLedgerId));
         let ckFee = await icrc1.icrc1_fee();
         if (_value >= ckFee*2){
-            ignore _subFeeBalance(eth_, _value);
+            let mainFeeBalance = _getFeeBalance(eth_);
+            ignore _subFeeBalance(eth_, Nat.min(mainFeeBalance, _value));
             let toid = _sendCkToken(eth_, Blob.fromArray(sa_one), _account, Nat.sub(_value, ckFee));
             await* _ictcSagaRun(toid, false);
         };
@@ -2185,13 +2227,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 var fee: Wei = 0;
                                 if (isERC20){
                                     fee := ckFee.token;
-                                    amount -= fee;
+                                    amount -= Nat.min(amount, fee);
                                     ignore _addFeeBalance(tx.tokenId, fee);
                                     let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
                                     ignore _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
                                 }else{
                                     fee := Nat.sub(ckFee.eth, gasFee.maxFee);
-                                    amount -= fee;
+                                    amount -= Nat.min(amount, fee);
                                     ignore _addFeeBalance(tx.tokenId, fee);
                                     let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
                                     ignore _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
@@ -2308,7 +2350,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 };
             }else{
                 depositFee := gasFee.maxFee;
-                amount -= depositFee;
+                amount -= Nat.min(amount, depositFee);
             };
             var txi0 = 0; // depositing gas txn
             if (isERC20){
@@ -2368,40 +2410,45 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             return #Err(#GenericError({code = 402; message="402: No new deposit, or the transaction is pending, or the amount is less than the minimum value."}));
         };
     };
+    private var lastUpdateBalanceItemTime : Nat = 0;
     private var lastUpdateBalanceTime : Nat = 0;
     private func _updateBalance(): async* (){
-        for ((accountId, tokenBalances) in Trie.iter(balances)){
-            if (_notPaused() and accountId != _accountId(Principal.fromActor(this), null)){ // Non-pool account
-                for((tokenIdBlob, (account, x)) in Trie.iter(tokenBalances)){
-                    let tokenId = ABI.toHex(Blob.toArray(tokenIdBlob));
-                    let isERC20 = tokenId != eth_;
-                    let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
-                    let (userAddress, userNonce) = _getEthAddressQuery(accountId);
-                    let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
-                    let txi = _getDepositingTxIndex(accountId);
-                    if (_now() >= lastUpdateBalanceTime + 60){
+        if (_notPaused() and _now() >= lastUpdateBalanceTime + 60 and _now() > lastUpdateBalanceItemTime + 15){
+            lastUpdateBalanceTime := _now();
+            lastUpdateBalanceItemTime := _now();
+            for ((accountId, tokenBalances) in Trie.iter(balances)){
+                if (_notPaused() and accountId != _accountId(Principal.fromActor(this), null)){ // Non-pool account
+                    for((tokenIdBlob, (account, x)) in Trie.iter(tokenBalances)){
+                        let tokenId = ABI.toHex(Blob.toArray(tokenIdBlob));
+                        let isERC20 = tokenId != eth_;
+                        let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
+                        let (userAddress, userNonce) = _getEthAddressQuery(accountId);
+                        let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
+                        let txi = _getDepositingTxIndex(accountId);
                         switch(txi){
                             case(?(txi_)){ // Method-1
                                 if (isERC20 and txi_ > 0){
                                     await* _syncTxStatus(Nat.sub(txi_,1), false); // isERC20: Deposit Gas
+                                    lastUpdateBalanceItemTime := _now();
                                 };
                                 await* _syncTxStatus(txi_, false); // Deposit ETH/ERC20
+                                lastUpdateBalanceItemTime := _now();
                             };
                             case(_){}; // Method-2
                         };
-                    };
-                    let depositingBalance = _getBalance(account, tokenId);
-                    if (depositingBalance > 0){
-                        ignore _subBalance(account, tokenId, depositingBalance);
-                        ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
-                        // mint ckToken
-                        let toid = _mintCkToken(tokenId, account, depositingBalance, txi);
-                        await* _ictcSagaRun(toid, false);
+                        let depositingBalance = _getBalance(account, tokenId);
+                        if (depositingBalance > 0){
+                            ignore _subBalance(account, tokenId, depositingBalance);
+                            ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
+                            // mint ckToken
+                            let toid = _mintCkToken(tokenId, account, depositingBalance, txi);
+                            await* _ictcSagaRun(toid, false);
+                            lastUpdateBalanceItemTime := _now();
+                        };
                     };
                 };
             };
         };
-        lastUpdateBalanceTime := _now();
     };
     private func _coverPendingTxs(): async* (){
         for ((accountId, txi) in Trie.iter(deposits)){
@@ -2420,10 +2467,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
-    private var lastUpdataBalanceForMode2Time : Nat = 0;
+    private var lastUpdateBalanceForMode2Time : Nat = 0;
     private func _updataBalanceForMode2() : async* (){
-        if (_notPaused() and _now() >= lastUpdataBalanceForMode2Time + 60 and _now() > lastUpdateMode2TxnTime + 15){
-            lastUpdataBalanceForMode2Time := _now();
+        if (_notPaused() and _now() >= lastUpdateBalanceForMode2Time + 60 and _now() > lastUpdateMode2TxnTime + 15){
+            lastUpdateBalanceForMode2Time := _now();
             lastUpdateMode2TxnTime := _now();
             let mainAccoundId = _accountId(Principal.fromActor(this), null);
             let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
@@ -2433,6 +2480,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 try{
                     if (_isPendingTxn(_txHash)){
                         let (succeeded, txn, blockHeight, status, txNonce, jsons) = await* _fetchTxn(_txHash);
+                        lastUpdateMode2TxnTime := _now();
                         switch(succeeded, txn, blockHeight, status){
                             case(true, ?(tokenTxn), blockHeight, #Confirmed){
                                 if (not(_isCkToken(tokenTxn.token)) and _isPendingTxn(_txHash)){
@@ -2441,7 +2489,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                     ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Not a supported token."})), ?accountId);
                                     continue Tasks;
                                 };
-                                if (_getBlockNumber() > blockHeight + VALID_BLOCKS_FOR_CLAIMING_TXN and _isPendingTxn(_txHash)){
+                                if (_getBlockNumber() >= blockHeight + VALID_BLOCKS_FOR_CLAIMING_TXN and _isPendingTxn(_txHash)){
                                     _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?("It has expired (valid for "# Nat.toText(VALID_BLOCKS_FOR_CLAIMING_TXN) #" blocks)."));
                                     _removePendingDepositTxn(_txHash);
                                     ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "It expired (valid for 648000 blocks)."})), ?accountId);
@@ -2462,10 +2510,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 let message = _depositingMsg(_txHash, _account);
                                 let rsv = await* ETHCrypto.convertSignature(_signature, message, tokenTxn.from, ck_chainId, utils_);
                                 let address = await* ETHCrypto.recover(rsv, ck_chainId, message, utils_);
-                                if (address == tokenTxn.from){ 
+                                lastUpdateMode2TxnTime := _now();
+                                if (address == tokenTxn.from and mainAddress == tokenTxn.to and _isPendingTxn(_txHash)){ 
                                     _verifyPendingDepositTxn(_txHash); // verified
                                     _putDepositTxn(_account, _txHash, _signature, #Pending, null, null);
                                     let (succeeded, blockHeight, txStatus, jsons) = await* _fetchTxReceipt(_txHash);
+                                    lastUpdateMode2TxnTime := _now();
                                     if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirmations and _isPendingTxn(_txHash)){
                                         let isERC20 = tokenTxn.token != eth_;
                                         //let gasFee = _getEthGas(tokenTxn.token); // {.... maxFee }eth Wei
@@ -2543,7 +2593,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 lastUpdateTxsTime := _now();
                 await* _syncTxStatus(txi, false);
             };
-            let retrievals = List.toArray(List.mapFilter<TxIndex, (Minter.TxStatus, Timestamp)>(pendingRetrievals, func (txi: TxIndex): ?(Minter.TxStatus, Timestamp){
+            let res = List.toArray(List.mapFilter<TxIndex, (Minter.TxStatus, Timestamp)>(pendingRetrievals, func (txi: TxIndex): ?(Minter.TxStatus, Timestamp){
                 switch(Trie.get(transactions, keyn(txi), Nat.equal)){
                     case(?(tx, ts, cts)){
                         if (_now() > ts + 600){ return ?(tx, ts) }else{ return null};
@@ -2551,159 +2601,166 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     case(_){ return null };
                 };
             }));
-            return retrievals;
+            return res;
         };
         return [];
     };
 
-    private func _calcuConfirmations(_stats: [([Value], Nat)], _value: [Value]) : ([Value], Nat, [([Value], Nat)]){
-        var isMatched: Bool = false;
-        var value: [Value] = [];
-        var num: Nat = 0;
-        var newStats: [([Value], Nat)] = [];
-        for ((v, n) in _stats.vals()){
-            if (v == _value){
-                isMatched := true;
-                newStats := Tools.arrayAppend(newStats, [(v, n + 1)]);
-                if (n+1 > num){
-                    value := v;
-                    num := n + 1;
-                };
-            }else{
-                newStats := Tools.arrayAppend(newStats, [(v, n)]);
-                if (n > num){
-                    value := v;
-                    num := n;
-                };
-            };
-        };
-        if (not(isMatched) and _value.size() > 0){
-            newStats := Tools.arrayAppend(newStats, [(_value, 1)]);
-            if (num == 0){
-                value := _value;
-                num := 1;
-            };
-        };
-        return (value, num, newStats);
-    };
-    private func _putRpcRequestLog(_rid: RpcRequestId, _log: RpcFetchLog, _minConfirmedNum: Nat): RpcRequestStatus{
-        let thisSucceedNum : Nat = switch(_log.status){ case(#ok(v)){ 1 }; case(_){ 0 } };
-        var consResult: RpcRequestStatus = #pending;
-        switch(Trie.get(ck_rpcRequests, keyn(_rid), Nat.equal)){
-            case(?(requestLog)){
-                var confirmedNum = requestLog.confirmed;
-                consResult := requestLog.status;
-                var requests: [RpcFetchLog] = requestLog.requests;
-                var confirmations: [([Value], Nat)] = [];
-                requests := Tools.arrayAppend(requests, [_log]);
-                if (thisSucceedNum > 0){
-                    for (log in requests.vals()){
-                        switch(log.status){
-                            case(#ok(v)){
-                                let (value, maxConfirmedNum, stats) = _calcuConfirmations(confirmations, v);
-                                confirmedNum := maxConfirmedNum;
-                                confirmations := stats;
-                                if (confirmedNum >= _minConfirmedNum){
-                                    consResult := #ok(value);
-                                };
-                            };
-                            case(_){};
-                        };
-                    };
-                };
-                ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
-                    confirmed = confirmedNum; 
-                    status = consResult;
-                    requests = requests; 
-                }).0;
-            };
-            case(_){
-                if (thisSucceedNum > 0 and thisSucceedNum >= _minConfirmedNum){
-                    consResult := _log.status;
-                };
-                ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
-                    confirmed = thisSucceedNum; 
-                    status = consResult;
-                    requests = [_log]; 
-                }).0;
-            };
-        };
-        return consResult;
-    };
-    private func _updateRpcProviderStats(_keeper: AccountId, _isSuccess: Bool): (){
-        switch(Trie.get(ck_rpcProviders, keyb(_keeper), Blob.equal)){
-            case(?(provider)){
-                var preHealthCheck = provider.preHealthCheck;
-                var healthCheck = provider.healthCheck;
-                if (_now() >= lastHealthinessSlotTime + healthinessIntervalSeconds){
-                    lastHealthinessSlotTime := _now() / healthinessIntervalSeconds * healthinessIntervalSeconds;
-                    preHealthCheck := healthCheck;
-                    healthCheck := {time = lastHealthinessSlotTime; calls = 0; errors = 0; recentPersistentErrors = ?0};
-                };
-                var recentPersistentErrors = Option.get(healthCheck.recentPersistentErrors, 0);
-                if (_isSuccess){
-                    recentPersistentErrors := 0;
-                }else{
-                    recentPersistentErrors += 1;
-                };
-                healthCheck := {
-                    time = healthCheck.time; 
-                    calls = healthCheck.calls + 1; 
-                    errors = healthCheck.errors + (if (_isSuccess){ 0 }else{ 1 }); 
-                    recentPersistentErrors = ?recentPersistentErrors; 
-                };
-                var status = provider.status;
-                if (recentPersistentErrors >= (if (app_debug){ 10 }else{ 6 }) or (healthCheck.calls >= 20 and healthCheck.errors * 100 / healthCheck.calls > 30)){
-                    status := #Unavailable;
-                };
-                ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(_keeper), Blob.equal, {
-                    name = provider.name; 
-                    url = provider.url; 
-                    keeper = provider.keeper;
-                    status = status; 
-                    calls = provider.calls + 1; 
-                    errors = provider.errors + (if (_isSuccess){ 0 }else{ 1 }); 
-                    preHealthCheck = preHealthCheck;
-                    healthCheck = healthCheck;
-                    latestCall = _now();
-                }).0;
-            };
-            case(_){};
-        };
-        let (keeper, url, total) = _getRpcUrl(0);
-        if (total < minRpcConfirmations){
-            paused := true;
-            ignore _putEvent(#suspend({message = ?"Insufficient number of available RPC nodes."}), ?_accountId(Principal.fromActor(this), null));
-        };
-    };
-    private func _preRpcLog(_id: RpcId, _url: Text, _input: Text) : (){
-        switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
-            case(?(log)){ assert(false) };
-            case(_){ 
-                ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
-                    url= _url;
-                    time = _now(); 
-                    input = _input; 
-                    result = null; 
-                    err = null
-                }).0; 
-            };
-        };
-    };
-    private func _postRpcLog(_id: RpcId, _result: ?Text, _err: ?Text) : (){
-        switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
-            case(?(log)){
-                ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
-                    url = log.url;
-                    time = log.time; 
-                    input = log.input; 
-                    result = _result; 
-                    err = _err
-                }).0; 
-            };
-            case(_){};
-        };
-    };
+    // private func _calcuConfirmations(_rid: RpcRequestId, _newRequestResult: [Value], _minConfirmedNum: Nat) : ([Value], Nat, [([Value], Nat)]){
+    //     var isMatched: Bool = false;
+    //     var result: [Value] = [];
+    //     var maxNum: Nat = 0;
+    //     var confirmations: [([Value], Nat)] = [];
+    //     var newConfirmations: [([Value], Nat)] = [];
+    //     switch(Trie.get(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal)){
+    //         case(?(_confirmations, _ts)){
+    //             confirmations := _confirmations;
+    //         };
+    //         case(_){};
+    //     };
+    //     for ((r, n) in confirmations.vals()){
+    //         if (r == _newRequestResult){
+    //             isMatched := true;
+    //             newConfirmations := Tools.arrayAppend(newConfirmations, [(r, n + 1)]);
+    //             if (n+1 > maxNum){
+    //                 result := r;
+    //                 maxNum := n + 1;
+    //             };
+    //         }else{
+    //             newConfirmations := Tools.arrayAppend(newConfirmations, [(r, n)]);
+    //             if (n > maxNum){
+    //                 result := r;
+    //                 maxNum := n;
+    //             };
+    //         };
+    //     };
+    //     if (not(isMatched) and _newRequestResult.size() > 0){
+    //         newConfirmations := Tools.arrayAppend(newConfirmations, [(_newRequestResult, 1)]);
+    //         if (maxNum == 0){
+    //             result := _newRequestResult;
+    //             maxNum := 1;
+    //         };
+    //     };
+    //     if (maxNum >= _minConfirmedNum){
+    //         ck_rpcRequestConsensusTemps := Trie.remove(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal).0;
+    //     }else{
+    //         ck_rpcRequestConsensusTemps := Trie.put(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal, (newConfirmations, _now())).0;
+    //     };
+    //     ck_rpcRequestConsensusTemps := Trie.filter(ck_rpcRequestConsensusTemps, func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): Bool{
+    //         _now() < v.1 + 12 * 3600;
+    //     });
+    //     return (result, maxNum, newConfirmations);
+    // };
+    
+    // private func _putRpcRequestLog(_rid: RpcRequestId, _log: RpcFetchLog, _minConfirmedNum: Nat): RpcRequestStatus{
+    //     let thisSucceedNum : Nat = switch(_log.status){ case(#ok(v)){ 1 }; case(_){ 0 } };
+    //     var consResult: RpcRequestStatus = #pending;
+    //     switch(Trie.get(ck_rpcRequests, keyn(_rid), Nat.equal)){
+    //         case(?(item)){
+    //             var confirmedNum = item.confirmed;
+    //             consResult := item.status;
+    //             var requests: [RpcFetchLog] = item.requests;
+    //             requests := Tools.arrayAppend(requests, [_log]);
+    //             if (thisSucceedNum > 0 and consResult == #pending){
+    //                 switch(_log.status){
+    //                     case(#ok(v)){
+    //                         let (values, maxConfirmedNum, stats) = _calcuConfirmations(_rid, v, _minConfirmedNum);
+    //                         confirmedNum := maxConfirmedNum;
+    //                         if (confirmedNum >= _minConfirmedNum){
+    //                             consResult := #ok(values);
+    //                         };
+    //                     };
+    //                     case(_){};
+    //                 };
+    //             };
+    //             ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
+    //                 confirmed = confirmedNum; 
+    //                 status = consResult;
+    //                 requests = requests; 
+    //             }).0;
+    //         };
+    //         case(_){
+    //             if (thisSucceedNum > 0 and thisSucceedNum >= _minConfirmedNum){
+    //                 consResult := _log.status;
+    //             };
+    //             ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
+    //                 confirmed = thisSucceedNum; 
+    //                 status = consResult;
+    //                 requests = [_log]; 
+    //             }).0;
+    //         };
+    //     };
+    //     return consResult;
+    // };
+    // private func _updateRpcProviderStats(_keeper: AccountId, _isSuccess: Bool): (){
+    //     switch(Trie.get(ck_rpcProviders, keyb(_keeper), Blob.equal)){
+    //         case(?(provider)){
+    //             var preHealthCheck = provider.preHealthCheck;
+    //             var healthCheck = provider.healthCheck;
+    //             if (_now() >= healthCheck.time + healthinessIntervalSeconds){
+    //                 let lastHealthinessSlotTime = _now() / healthinessIntervalSeconds * healthinessIntervalSeconds;
+    //                 preHealthCheck := healthCheck;
+    //                 healthCheck := {time = lastHealthinessSlotTime; calls = 0; errors = 0; recentPersistentErrors = ?0};
+    //             };
+    //             var recentPersistentErrors = Option.get(healthCheck.recentPersistentErrors, 0);
+    //             if (_isSuccess){
+    //                 recentPersistentErrors := 0;
+    //             }else{
+    //                 recentPersistentErrors += 1;
+    //             };
+    //             healthCheck := {
+    //                 time = healthCheck.time; 
+    //                 calls = healthCheck.calls + 1; 
+    //                 errors = healthCheck.errors + (if (_isSuccess){ 0 }else{ 1 }); 
+    //                 recentPersistentErrors = ?recentPersistentErrors; 
+    //             };
+    //             var status = provider.status;
+    //             if (recentPersistentErrors >= (if (app_debug){ 10 }else{ 6 }) or (healthCheck.calls >= 20 and healthCheck.errors * 100 / healthCheck.calls > 30)){
+    //                 status := #Unavailable;
+    //             };
+    //             ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(_keeper), Blob.equal, {
+    //                 name = provider.name; 
+    //                 url = provider.url; 
+    //                 keeper = provider.keeper;
+    //                 status = status; 
+    //                 calls = provider.calls + 1; 
+    //                 errors = provider.errors + (if (_isSuccess){ 0 }else{ 1 }); 
+    //                 preHealthCheck = preHealthCheck;
+    //                 healthCheck = healthCheck;
+    //                 latestCall = _now();
+    //             }).0;
+    //         };
+    //         case(_){};
+    //     };
+    // };
+    // private func _preRpcLog(_id: RpcId, _url: Text, _input: Text) : (){
+    //     switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
+    //         case(?(log)){ assert(false) };
+    //         case(_){ 
+    //             ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
+    //                 url= _url;
+    //                 time = _now(); 
+    //                 input = _input; 
+    //                 result = null; 
+    //                 err = null
+    //             }).0; 
+    //         };
+    //     };
+    // };
+    // private func _postRpcLog(_id: RpcId, _result: ?Text, _err: ?Text) : (){
+    //     switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
+    //         case(?(log)){
+    //             ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
+    //                 url = log.url;
+    //                 time = log.time; 
+    //                 input = log.input; 
+    //                 result = _result; 
+    //                 err = _err
+    //             }).0; 
+    //         };
+    //         case(_){};
+    //     };
+    // };
     private func _putEvent(_event: Event, _a: ?AccountId) : BlockHeight{
         blockEvents := ICEvents.putEvent<Event>(blockEvents, blockIndex, _event);
         switch(_a){
@@ -2724,8 +2781,26 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private func _setLatestVisitTime(_owner: Principal) : (){
         latestVisitTime := Trie.put(latestVisitTime, keyp(_owner), Principal.equal, _now()).0;
         latestVisitTime := Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
-            _now() < v + 24*3600
+            _now() < v + 3600 // 1 hour
         });
+    };
+    private func _dosCheck(_accountId: AccountId, _max: Nat) : Bool{
+        let data = Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
+            _now() < v + 30 // 30 seconds
+        });
+        if (Trie.size(data) >= _max){
+            if(Option.isSome(Trie.get(deposits, keyb(_accountId), Blob.equal))){
+                return true;
+            }else if(Option.isSome(Trie.get(balances, keyb(_accountId), Blob.equal))){
+                return true;
+            }else if(Option.isSome(Trie.get(withdrawals, keyb(_accountId), Blob.equal))){
+                return true;
+            }else{
+                return false;
+            };
+        }else{
+            return true;
+        };
     };
     
     private func _depositingMsg(_txHash: TxHash, _account: Account) : [Nat8]{
@@ -2776,6 +2851,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({code = 400; message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        if (not(_dosCheck(accountId, 15)) or not(_dosCheck(_accountId(msg.caller, null), 15))){
+            return #Err(#GenericError({code = 400; message = "400: The network is busy, please try again later!"}))
+        };
         _setLatestVisitTime(msg.caller);
         let res = await* _depositNotify(_token, _account);
         await* _updateBalance(); // for all accounts
@@ -2799,6 +2878,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         //let tokenId = _toLower(Option.get(_token, eth_));
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({code = 400; message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
+        };
+        if (not(_dosCheck(accountId, 15)) or not(_dosCheck(_accountId(msg.caller, null), 15))){
+            return #Err(#GenericError({code = 400; message = "400: The network is busy, please try again later!"}))
         };
         _setLatestVisitTime(msg.caller);
         let txHash = _toLower(_txHash);
@@ -2825,6 +2907,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
         };
+        let accountId = _accountId(msg.caller, null);
+        if (not(_dosCheck(accountId, 5))){
+            throw Error.reject("400: The network is busy, please try again later!");
+        };
         _setLatestVisitTime(msg.caller);
         await* _updataBalanceForMode2();
     };
@@ -2850,12 +2936,16 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({code = 400; message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
-        _setLatestVisitTime(msg.caller);
         let accountId = _accountId(msg.caller, _sa);
+        if (not(_dosCheck(accountId, 15)) or not(_dosCheck(_accountId(msg.caller, null), 15))){
+            return #Err(#GenericError({code = 400; message = "400: The network is busy, please try again later!"}))
+        };
+        _setLatestVisitTime(msg.caller);
         let account: Minter.Account = {owner=msg.caller; subaccount=_sa};
         let withdrawalIcrc1Account: ICRC1.Account = {owner=Principal.fromActor(this); subaccount=?accountId};
         let withdrawalAccount : Minter.Account = { owner = msg.caller; subaccount = ?Blob.toArray(accountId); };
         let mainAccoundId = _accountId(Principal.fromActor(this), null);
+        let mainAccount: Account = {owner = Principal.fromActor(this); subaccount = null };
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
         let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
         let toAddress = _toLower(_address);
@@ -2876,9 +2966,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         //AmountTooLow
         var sendingAmount = _amount;
         var sendingFee: Wei = 0;
-        if (_amount > ckFee.token and _amount >= _getTokenMinAmount(tokenId)){
+        if (sendingAmount > ckFee.token and sendingAmount >= _getTokenMinAmount(tokenId)){
             sendingFee := ckFee.token;
-            sendingAmount -= sendingFee;
+            sendingAmount -= ckFee.token;
         }else{
             return #Err(#GenericError({code = 402; message="402: The amount is less than the gas or the minimum value."}));
         };
@@ -2889,7 +2979,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             return #Err(#GenericError({code = 402; message="402: Insufficient funds. (balance of withdrawal account is "# Nat.toText(balance) #")"}));
         };
         //Insufficient pool balance
-        if (_getBalance({owner = Principal.fromActor(this); subaccount = null }, tokenId) < _amount){
+        if (_getBalance(mainAccount, tokenId) < _amount){
             return #Err(#GenericError({code = 402; message="402: Insufficient pool balance."}));
         };
         //Insufficient fee balance
@@ -2899,11 +2989,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         //Burn
         switch(await* _burnCkToken2(tokenId, accountId, _address, _amount, account)){
             case(#Ok(height)){
-                ignore _subBalance({owner = Principal.fromActor(this); subaccount = null }, tokenId, _amount); 
+                ignore _subBalance(mainAccount, tokenId, Nat.min(_getBalance(mainAccount, tokenId), _amount)); 
                 ignore _addFeeBalance(tokenId, ckFee.token);
                 let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
                 ignore _mintCkToken(tokenId, feeAccount, ckFee.token, null);
-                ignore _subFeeBalance(eth_, gasFee.maxFee);
+                ignore _subFeeBalance(eth_, Nat.min(_getFeeBalance(eth_), gasFee.maxFee));
                 ignore _burnCkToken(eth_, Blob.fromArray(sa_one), gasFee.maxFee, feeAccount);
                 //totalSent += _amount;
                 let txi = _newTx(#Withdraw, account, tokenId, mainAddress, toAddress, sendingAmount, gasFee);
@@ -2966,6 +3056,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
         };
+        let accountId = _accountId(msg.caller, null);
+        if (not(_dosCheck(accountId, 5))){
+            throw Error.reject("400: The network is busy, please try again later!");
+        };
         _setLatestVisitTime(msg.caller);
         return await* _updateRetrievals();
     };
@@ -2981,8 +3075,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
         };
-        _setLatestVisitTime(msg.caller);
         let accountId = _accountId(msg.caller, _sa);
+        if (not(_dosCheck(accountId, 5)) or not(_dosCheck(_accountId(msg.caller, null), 5))){
+            throw Error.reject("400: The network is busy, please try again later!");
+        };
+        _setLatestVisitTime(msg.caller);
         assert((_onlyTxCaller(accountId, _txi) and _notPaused()) or _onlyOwner(msg.caller));
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
@@ -2990,7 +3087,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 if (_now() < coveredTs + 20*60){ // 20 minuts
                     throw Error.reject("400: Please do this 20 minutes after the last status update. Last Updated: " # Nat.toText(coveredTs) # " (timestamp).");
                 };
-                if (Array.size(tx.txHash) > 5){
+                if (Array.size(tx.txHash) > 5 and not(_onlyOwner(msg.caller))){
                     throw Error.reject("400: Covering the transaction can be submitted up to 5 times.");
                 };
                 // let isERC20 = tx.tokenId != eth_;
@@ -3068,7 +3165,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return res;
     };
     public query func get_mode2_pending_deposit_txn(_txHash: TxHash) : async ?Minter.PendingDepositTxn{
-        return _getPendingDepositTxn(_txHash);
+        return _getPendingDepositTxn(_toLower(_txHash));
     };
     public query func get_mode2_pending_all(_token: {#all; #eth; #token:EthAddress}, _account: ?Account) : async 
     [(txn: Minter.DepositTxn, updatedTs: Timestamp, verified: Bool)]{
@@ -3093,7 +3190,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return res;
     };
     public query func get_mode2_deposit_txn(_txHash: TxHash) : async ?(DepositTxn, Timestamp){
-        return _getDepositTxn(_txHash);
+        return _getDepositTxn(_toLower(_txHash));
     };
     public query func get_pool_balance(_token: ?EthAddress): async Wei{
         let tokenId = _toLower(Option.get(_token, eth_));
@@ -3201,6 +3298,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     public query func get_rpc_request(_rpcRequestId: RpcRequestId) : async ?RpcRequestConsensus{
         return Trie.get(ck_rpcRequests, keyn(_rpcRequestId), Nat.equal);
+    };
+    public func get_rpc_request_temps(): async [(RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp))]{
+        return Trie.toArray<RpcRequestId, ([([Value], Nat)], Timestamp), (RpcRequestId, ([([Value], Nat)], Timestamp))>(ck_rpcRequestConsensusTemps, 
+            func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): (RpcRequestId, ([([Value], Nat)], Timestamp)){
+                return (k, v);
+            });
     };
 
     /* ===========================
@@ -3690,8 +3793,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     shortfall := Nat.sub(value, temp);
                     value := temp;
                 };
-                ckTotalSupply -= value;
-                ckFeetoBalance -= value;
+                ckTotalSupply -= Nat.min(ckTotalSupply, value);
+                ckFeetoBalance -= Nat.min(ckFeetoBalance, value);
                 ignore _burnCkToken(tokenId, Blob.fromArray(sa_one), value, {owner = Principal.fromActor(this); subaccount = ?sa_one });
             } else if (ckTotalSupply < nativeBalance and _surplusToFee){
                 let value = Nat.sub(nativeBalance, ckTotalSupply);
@@ -3938,6 +4041,27 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         firstRpcRequestId := _clearTo + 1;
     };
+    public shared(msg) func clearDepositTxns() : async (){
+        assert(_onlyOwner(msg.caller));
+        depositTxns := Trie.filter<TxHashId, (tx: DepositTxn, updatedTime: Timestamp)>(depositTxns, func (k: TxHashId, v: (tx: DepositTxn, updatedTime: Timestamp)): Bool{
+            _now() <= v.1 + VALID_BLOCKS_FOR_CLAIMING_TXN * ckNetworkBlockSlot + 7 * 24 * 3600
+        });
+        pendingDepositTxns := Trie.filter<TxHashId, Minter.PendingDepositTxn>(pendingDepositTxns, func (k: TxHashId, v: Minter.PendingDepositTxn): Bool{
+            _now() <= v.4 + VALID_BLOCKS_FOR_CLAIMING_TXN * ckNetworkBlockSlot + 7 * 24 * 3600
+        });
+    };
+    public shared(msg) func clearCkTransactions() : async (){
+        assert(_onlyOwner(msg.caller));
+        transactions := Trie.filter<TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)>(transactions, 
+            func (k: TxIndex, v: (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)): Bool{
+                let res = (v.0.status != #Confirmed and v.0.status != #Failure) or _now() <= v.1 + VALID_BLOCKS_FOR_CLAIMING_TXN * ckNetworkBlockSlot + 7 * 24 * 3600;
+                if (not(res) and not(_isRetrieving(k))){
+                    retrievals := Trie.remove(retrievals, keyn(k), Nat.equal).0;
+                };
+                return res;
+            }
+        );
+    };
 
     // Cycles monitor
     public shared(msg) func monitor_put(_canisterId: Principal): async (){
@@ -3961,12 +4085,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         return await* RpcCaller.call(_rpcUrl, _input, _responseSize, RPC_AGENT_CYCLES, ?{function = rpc_call_transform; context = Blob.fromArray([])});
     };
-    // public shared(msg) func debug_clear_pendingDepositTxns() : async (){
-    //     assert(_onlyOwner(msg.caller));
-    //     pendingDepositTxns := Trie.filter<TxHashId, Minter.PendingDepositTxn>(pendingDepositTxns, func (k: TxHashId, v: Minter.PendingDepositTxn): Bool{
-    //         _now() < v.4 + 90*24*3600 // about 90 days of ether network
-    //     });
-    // };
     public shared(msg) func debug_get_address(_account : Account) : async (EthAddress, Nonce){
         assert(_onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -3997,7 +4115,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return await* _fetchTxReceipt(_txHash);
     };
     public shared(msg) func debug_get_tx(_txi: TxIndex) : async ?Minter.TxStatus{
-        // assert(_onlyOwner(msg.caller));
+        assert(_onlyOwner(msg.caller));
         return _getTx(_txi);
     };
     public shared(msg) func debug_new_tx(_type: {#Deposit; #DepositGas; #Withdraw}, _account: Account, _tokenId: ?EthAddress, _from: EthAddress, _to: EthAddress, _amount: Wei) : async TxIndex{
@@ -4079,7 +4197,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     public shared(msg) func debug_updataBalanceForMode2(): async (){
         assert(_onlyOwner(msg.caller));
-        lastUpdataBalanceForMode2Time := 0;
+        lastUpdateBalanceForMode2Time := 0;
         lastUpdateMode2TxnTime := 0;
         await* _updataBalanceForMode2();
     };
@@ -4125,7 +4243,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, tokenInfo.ckLedgerId);
             };
         };
-        cyclesMonitor := await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, INIT_CKTOKEN_CYCLES / (if (app_debug) {2} else {1}), INIT_CKTOKEN_CYCLES * 50, 500000000);
+        let monitor = await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, INIT_CKTOKEN_CYCLES / (if (app_debug) {2} else {1}), INIT_CKTOKEN_CYCLES * 50, 500000000);
+        if (Trie.size(cyclesMonitor) == Trie.size(monitor)){
+            cyclesMonitor := monitor;
+        };
     };
     public shared(msg) func debug_fetchPairPrice(_pair: Principal) : async Float{
         assert(_onlyOwner(msg.caller));
@@ -4364,9 +4485,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     // };
 
     private func timerLoop() : async (){
-        if (_now() > lastMonitorTime + 2 * 24 * 3600){
+        if (_now() > lastMonitorTime + 24 * 3600){
             try{ 
-                cyclesMonitor := await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, INIT_CKTOKEN_CYCLES / (if (app_debug) {2} else {1}), INIT_CKTOKEN_CYCLES * 50, 0);
+                let monitor = await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, INIT_CKTOKEN_CYCLES / (if (app_debug) {2} else {1}), INIT_CKTOKEN_CYCLES * 50, 0);
+                if (Trie.size(cyclesMonitor) == Trie.size(monitor)){
+                    cyclesMonitor := monitor;
+                };
                 lastMonitorTime := _now();
              }catch(e){};
         };
@@ -4389,6 +4513,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             try{ ignore await* _updateRetrievals() }catch(e){};
             try{ await* _updateBalance() }catch(e){};
             try{ await* _coverPendingTxs() }catch(e){};
+            let (keeper, url, total) = _getRpcUrl(0);
+            if (total < minRpcConfirmations){
+                paused := true;
+                ignore _putEvent(#suspend({message = ?"Insufficient number of available RPC nodes."}), ?_accountId(Principal.fromActor(this), null));
+            };
         };
     };
     private var timerId: Nat = 0;
@@ -4436,6 +4565,326 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         timerId := Timer.recurringTimer(#seconds(if (app_debug) {3600*2} else {1800}), timerLoop);
         timerId2 := Timer.recurringTimer(#seconds(if (app_debug) {300} else {120}), timerLoop2);
+    };
+
+    /* ===========================
+      Backup / Recovery section
+    ============================== */
+    /// ## Backup and Recovery
+    /// The backup and recovery functions are not normally used, but are used when canister cannot be upgraded and needs to be reinstalled:
+    /// - call backup() method to back up the data.
+    /// - reinstall cansiter.
+    /// - call recovery() to restore the data.
+    /// Caution:
+    /// - If the data in this canister has a dependency on canister-id, it must be reinstalled in the same canister and cannot be migrated to a new canister.
+    /// - Normal access needs to be stopped during backup and recovery, otherwise the data may be contaminated.
+    /// - Backup and recovery operations have been categorized by variables, and each operation can only target one category of data, so multiple operations are required to complete the backup and recovery of all data.
+    /// - The backup and recovery operations are not paged for single-variable datasets. If you encounter a failure due to large data size, please try the following:
+    ///     - Calling canister's cleanup function or configuration will delete stale data for some variables.
+    ///     - Backup and recovery of non-essential data can be ignored.
+    ///     - Query the necessary data through other query functions, and then call recovery() to restore the data.
+    ///     - Abandon this solution and seek other data recovery solutions.
+    
+    // type Toid = SagaTM.Toid;
+    // type Ttid = SagaTM.Ttid;
+    type Order = SagaTM.Order;
+    type Task = SagaTM.Task;
+    type SagaData = Backup.SagaData;
+    type BackupRequest = Backup.BackupRequest;
+    type BackupResponse = Backup.BackupResponse;
+
+    /// Backs up data of the specified `BackupRequest` classification, and the result is wrapped using the `BackupResponse` type.
+    public shared(msg) func backup(_request: BackupRequest) : async BackupResponse{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData){
+                return #otherData({
+                    countMinting = countMinting;
+                    totalMinting = totalMinting;
+                    countRetrieval = countRetrieval;
+                    totalRetrieval = totalRetrieval;
+                    quoteToken = quoteToken;
+                    txIndex = txIndex;
+                    ck_chainId = ck_chainId;
+                    ck_ethBlockNumber = ck_ethBlockNumber;
+                    ck_gasPrice = ck_gasPrice;
+                    rpcId = rpcId;
+                    firstRpcId = firstRpcId;
+                    rpcRequestId = rpcRequestId;
+                    firstRpcRequestId = firstRpcRequestId;
+                    blockIndex = blockIndex;
+                    firstBlockIndex = firstBlockIndex;
+                    ictc_admins = ictc_admins;
+                });
+            };
+            case(#icrc1WasmHistory){
+                let icrc1Wasm: [(wasm: [Nat8], version: Text)] = (if (icrc1WasmHistory.size() > 0){ [icrc1WasmHistory[0]] }else{ [] });
+                return #icrc1WasmHistory(icrc1Wasm);
+            };
+            case(#accounts){
+                return #accounts(Trie.toArray<AccountId, (EthAddress, Nonce), (AccountId, (EthAddress, Nonce))>(accounts, 
+                    func (k: AccountId, v: (EthAddress, Nonce)): (AccountId, (EthAddress, Nonce)){
+                        return (k, v);
+                    }));
+            };
+            case(#tokens){
+                return #tokens(Trie.toArray<EthAddress, Minter.TokenInfo, (EthAddress, Minter.TokenInfo)>(tokens, 
+                    func (k: EthAddress, v: Minter.TokenInfo): (EthAddress, Minter.TokenInfo){
+                        return (k, v);
+                    }));
+            };
+            case(#deposits){
+                return #deposits(Trie.toArray<AccountId, TxIndex, (AccountId, TxIndex)>(deposits, 
+                    func (k: AccountId, v: TxIndex): (AccountId, TxIndex){
+                        return (k, v);
+                    }));
+            };
+            case(#balances){
+                return #balances(Trie.toArray<AccountId, Trie.Trie<Minter.EthTokenId, (Account, Wei)>, (AccountId, [(Minter.EthTokenId, (Account, Wei))])>(balances, 
+                    func (k: AccountId, v: Trie.Trie<Minter.EthTokenId, (Account, Wei)>): (AccountId, [(Minter.EthTokenId, (Account, Wei))]){
+                        let values: [(Minter.EthTokenId, (Account, Wei))] = Trie.toArray<Minter.EthTokenId, (Account, Wei), (Minter.EthTokenId, (Account, Wei))>(v, 
+                        func (k2: Minter.EthTokenId, v2: (Account, Wei)): (Minter.EthTokenId, (Account, Wei)){
+                            return (k2, v2);
+                        });
+                        return (k, values);
+                    }));
+            };
+            case(#feeBalances){
+                return #feeBalances(Trie.toArray<Minter.EthTokenId, Wei, (Minter.EthTokenId, Wei)>(feeBalances, 
+                    func (k: Minter.EthTokenId, v: Wei): (Minter.EthTokenId, Wei){
+                        return (k, v);
+                    }));
+            };
+            case(#retrievals){
+                return #retrievals(Trie.toArray<TxIndex, Minter.RetrieveStatus, (TxIndex, Minter.RetrieveStatus)>(retrievals, 
+                    func (k: TxIndex, v: Minter.RetrieveStatus): (TxIndex, Minter.RetrieveStatus){
+                        return (k, v);
+                    }));
+            };
+            case(#withdrawals){
+                return #withdrawals(Trie.toArray<AccountId, List.List<TxIndex>, (AccountId, [TxIndex])>(withdrawals, 
+                    func (k: AccountId, v: List.List<TxIndex>): (AccountId, [TxIndex]){
+                        return (k, List.toArray(v));
+                    }));
+            };
+            case(#pendingRetrievals){
+                return #pendingRetrievals(List.toArray(pendingRetrievals));
+            };
+            case(#transactions){
+                return #transactions(Trie.toArray<TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp), (TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp))>(transactions, 
+                    func (k: TxIndex, v: (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)): (TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)){
+                        return (k, v);
+                    }));
+            };
+            case(#depositTxns){
+                return #depositTxns(Trie.toArray<TxHashId, (tx: Minter.DepositTxn, updatedTime: Timestamp), (TxHashId, (tx: Minter.DepositTxn, updatedTime: Timestamp))>(depositTxns, 
+                    func (k: TxHashId, v: (tx: Minter.DepositTxn, updatedTime: Timestamp)): (TxHashId, (tx: Minter.DepositTxn, updatedTime: Timestamp)){
+                        return (k, v);
+                    }));
+            };
+            case(#pendingDepositTxns){
+                return #pendingDepositTxns(Trie.toArray<TxHashId, Minter.PendingDepositTxn, (TxHashId, Minter.PendingDepositTxn)>(pendingDepositTxns, 
+                    func (k: TxHashId, v: Minter.PendingDepositTxn): (TxHashId, Minter.PendingDepositTxn){
+                        return (k, v);
+                    }));
+            };
+            case(#ck_keepers){
+                return #ck_keepers(Trie.toArray<AccountId, Minter.Keeper, (AccountId, Minter.Keeper)>(ck_keepers, 
+                    func (k: AccountId, v: Minter.Keeper): (AccountId, Minter.Keeper){
+                        return (k, v);
+                    }));
+            };
+            case(#ck_rpcProviders){
+                return #ck_rpcProviders(Trie.toArray<AccountId, Minter.RpcProvider, (AccountId, Minter.RpcProvider)>(ck_rpcProviders, 
+                    func (k: AccountId, v: Minter.RpcProvider): (AccountId, Minter.RpcProvider){
+                        return (k, v);
+                    }));
+            };
+            case(#ck_rpcLogs){
+                return #ck_rpcLogs(Trie.toArray<Minter.RpcId, Minter.RpcLog, (Minter.RpcId, Minter.RpcLog)>(ck_rpcLogs, 
+                    func (k: Minter.RpcId, v: Minter.RpcLog): (Minter.RpcId, Minter.RpcLog){
+                        return (k, v);
+                    }));
+            };
+            case(#ck_rpcRequests){
+                return #ck_rpcRequests(Trie.toArray<Minter.RpcRequestId, Minter.RpcRequestConsensus, (Minter.RpcRequestId, Minter.RpcRequestConsensus)>(ck_rpcRequests, 
+                    func (k: Minter.RpcRequestId, v: Minter.RpcRequestConsensus): (Minter.RpcRequestId, Minter.RpcRequestConsensus){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_accountAddresses){
+                return #kyt_accountAddresses(Trie.toArray<AccountId, [KYT.ChainAccount], (AccountId, [KYT.ChainAccount])>(kyt_accountAddresses, 
+                    func (k: AccountId, v: [KYT.ChainAccount]): (AccountId, [KYT.ChainAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_addressAccounts){
+                return #kyt_addressAccounts(Trie.toArray<Address, [KYT.ICAccount], (Address, [KYT.ICAccount])>(kyt_addressAccounts, 
+                    func (k: Address, v: [KYT.ICAccount]): (Address, [KYT.ICAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_txAccounts){
+                return #kyt_txAccounts(Trie.toArray<KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)], (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)])>(kyt_txAccounts, 
+                    func (k: KYT.HashId, v: [(KYT.ChainAccount, KYT.ICAccount)]): (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)]){
+                        return (k, v);
+                    }));
+            };
+            case(#blockEvents){
+                return #blockEvents(Trie.toArray<Minter.BlockHeight, (Minter.Event, Timestamp), (Minter.BlockHeight, (Minter.Event, Timestamp))>(blockEvents, 
+                    func (k: Minter.BlockHeight, v: (Minter.Event, Timestamp)): (Minter.BlockHeight, (Minter.Event, Timestamp)){
+                        return (k, v);
+                    }));
+            };
+            case(#accountEvents){
+                return #accountEvents(Trie.toArray<AccountId, List.List<Minter.BlockHeight>, (AccountId, [Minter.BlockHeight])>(accountEvents, 
+                    func (k: AccountId, v: List.List<Minter.BlockHeight>): (AccountId, [Minter.BlockHeight]){
+                        return (k, List.toArray(v));
+                    }));
+            };
+            case(#cyclesMonitor){
+                return #cyclesMonitor(Trie.toArray<Principal, Nat, (Principal, Nat)>(cyclesMonitor, 
+                    func (k: Principal, v: Nat): (Principal, Nat){
+                        return (k, v);
+                    }));
+            };
+        };
+    };
+    
+    /// Restore `BackupResponse` data to the canister's global variable.
+    public shared(msg) func recovery(_request: BackupResponse) : async Bool{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData(data)){
+                countMinting := data.countMinting;
+                totalMinting := data.totalMinting;
+                countRetrieval := data.countRetrieval;
+                totalRetrieval := data.totalRetrieval;
+                quoteToken := data.quoteToken;
+                txIndex := data.txIndex;
+                ck_chainId := data.ck_chainId;
+                ck_ethBlockNumber := data.ck_ethBlockNumber;
+                ck_gasPrice := data.ck_gasPrice;
+                rpcId := data.rpcId;
+                firstRpcId := data.firstRpcId;
+                rpcRequestId := data.rpcRequestId;
+                firstRpcRequestId := data.firstRpcRequestId;
+                blockIndex := data.blockIndex;
+                firstBlockIndex := data.firstBlockIndex;
+                ictc_admins := data.ictc_admins;
+            };
+            case(#icrc1WasmHistory(data)){
+                icrc1WasmHistory := data;
+            };
+            case(#accounts(data)){
+                for ((k, v) in data.vals()){
+                    accounts := Trie.put(accounts, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#tokens(data)){
+                for ((k, v) in data.vals()){
+                    tokens := Trie.put(tokens, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#deposits(data)){
+                for ((k, v) in data.vals()){
+                    deposits := Trie.put(deposits, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#balances(data)){
+                for ((k, v) in data.vals()){
+                    var temp: Trie.Trie<Minter.EthTokenId, (Account, Wei)> = Trie.empty();
+                    for ((k2, v2) in v.vals()){
+                        temp := Trie.put(temp, keyb(k2), Blob.equal, v2).0;
+                    };
+                    balances := Trie.put(balances, keyb(k), Blob.equal, temp).0;
+                };
+            };
+            case(#feeBalances(data)){
+                for ((k, v) in data.vals()){
+                    feeBalances := Trie.put(feeBalances, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#retrievals(data)){
+                for ((k, v) in data.vals()){
+                    retrievals := Trie.put(retrievals, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#withdrawals(data)){
+                for ((k, v) in data.vals()){
+                    withdrawals := Trie.put(withdrawals, keyb(k), Blob.equal, List.fromArray(v)).0;
+                };
+            };
+            case(#pendingRetrievals(data)){
+                pendingRetrievals := List.fromArray(data);
+            };
+            case(#transactions(data)){
+                for ((k, v) in data.vals()){
+                    transactions := Trie.put(transactions, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#depositTxns(data)){
+                for ((k, v) in data.vals()){
+                    depositTxns := Trie.put(depositTxns, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#pendingDepositTxns(data)){
+                for ((k, v) in data.vals()){
+                    pendingDepositTxns := Trie.put(pendingDepositTxns, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#ck_keepers(data)){
+                for ((k, v) in data.vals()){
+                    ck_keepers := Trie.put(ck_keepers, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#ck_rpcProviders(data)){
+                for ((k, v) in data.vals()){
+                    ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#ck_rpcLogs(data)){
+                for ((k, v) in data.vals()){
+                    ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#ck_rpcRequests(data)){
+                for ((k, v) in data.vals()){
+                    ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#kyt_accountAddresses(data)){
+                for ((k, v) in data.vals()){
+                    kyt_accountAddresses := Trie.put(kyt_accountAddresses, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#kyt_addressAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_addressAccounts := Trie.put(kyt_addressAccounts, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#kyt_txAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_txAccounts := Trie.put(kyt_txAccounts, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#blockEvents(data)){
+                for ((k, v) in data.vals()){
+                    blockEvents := Trie.put(blockEvents, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#accountEvents(data)){
+                for ((k, v) in data.vals()){
+                    accountEvents := Trie.put(accountEvents, keyb(k), Blob.equal, List.fromArray(v)).0;
+                };
+            };
+            case(#cyclesMonitor(data)){
+                for ((k, v) in data.vals()){
+                    cyclesMonitor := Trie.put(cyclesMonitor, keyp(k), Principal.equal, v).0;
+                };
+            };
+        };
+        return true;
     };
 
 };

@@ -58,6 +58,7 @@ import KYT "mo:icl/KYT";
 import ICEvents "mo:icl/ICEvents";
 import DRC20 "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
+import Backup "lib/BackupTypes";
 
 // InitArgs = {
 //     retrieve_btc_min_amount : Nat64; // 10000
@@ -67,7 +68,7 @@ import ICTokens "mo:icl/ICTokens";
 //     dex_pair: ?Principal;
 //     mode: Mode;
 //   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3fwop-7iaaa-aaaak-adzca-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
+// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
 shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     // assert(initArgs.ecdsa_key_name == "key_1"); 
     // assert(initArgs.btc_network == #Mainnet); 
@@ -119,7 +120,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     
     private var app_debug : Bool = false; /*config*/
-    private let version_: Text = "0.2.3"; /*config*/
+    private let version_: Text = "0.2.4"; /*config*/
     private let ns_: Nat = 1000000000;
     private var pause: Bool = initArgs.mode == #ReadOnly;
     private stable var owner: Principal = installMsg.caller;
@@ -156,10 +157,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private stable var lastFetchUtxosTime : Time.Time = 0;
     private stable var accountUtxos = Trie.empty<Address, (PubKey, DerivationPath, [Utxo])>(); 
     private stable var latestVisitTime = Trie.empty<Principal, Timestamp>(); 
-    private stable var retrieveBTC = Trie.empty<EventBlockHeight, Minter.RetrieveStatus>();  
-    private stable var sendingBTC = Trie.empty<TxIndex, Minter.SendingBtcStatus>();  
+    private stable var retrieveBTC = Trie.empty<EventBlockHeight, Minter.RetrieveStatus>(); // retrieval Events
+    private stable var sendingBTC = Trie.empty<TxIndex, Minter.SendingBtcStatus>(); // ck txns
     private stable var txInProcess : [TxIndex] = [];
     private stable var txIndex : TxIndex = 0;
+    private stable var firstTxIndex : TxIndex = 0;
     private stable var lastTxTime : Time.Time = 0;
     private stable var blockEvents = Trie.empty<Nat, EventOldVerson>(); // @deprecated
     private stable var minter_public_key : [Nat8] = [];
@@ -226,6 +228,20 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             };
         };
     };
+    private func _accountUtxosLatestHeight(_address: Text) : Nat32{
+        switch(_getAccountUtxos(_address)){
+            case(?(item)){
+                if (item.2.size() > 0){
+                    return item.2[0].height;
+                }else{
+                    return 0;
+                };
+            };
+            case(_){
+                return 0;
+            };
+        };
+    };
     private func _getLatestVisitTime(_address: Principal) : Timestamp{
         switch(Trie.get(latestVisitTime, keyp(_address), Principal.equal)){
             case(?(v)){ return v };
@@ -235,8 +251,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private func _setLatestVisitTime(_address: Principal) : (){
         latestVisitTime := Trie.put(latestVisitTime, keyp(_address), Principal.equal, _now()).0;
         latestVisitTime := Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
-            _now() < v + 24*3600
+            _now() < v + 3600
         });
+    };
+    private func _dosCheck(_accountId: AccountId, _max: Nat) : Bool{
+        let data = Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
+            _now() < v + 30 // 30 seconds
+        });
+        if (Trie.size(data) >= _max){
+            if(Option.isSome(Trie.get(kyt_accountAddresses, keyb(_accountId), Blob.equal))){
+                return true;
+            }else{
+                return false;
+            };
+        }else{
+            return true;
+        };
     };
 
     private func _now() : Timestamp{
@@ -498,6 +528,13 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         let point = Utils.unwrap(Affine.fromBytes(public_key_bytes, CURVE));
         Utils.get_ok(Publickey.decode(#point point))
     };
+    private func _initMinterAddress() : async* (){
+        if (minter_address == ""){
+            let res = await* _fetchAccountAddress([]);
+            minter_public_key := res.0;
+            minter_address := res.1;
+        };
+    };
     private func _accountId(_owner: Principal, _subaccount: ?[Nat8]) : Blob{
         return Blob.fromArray(Tools.principalToAccount(_owner, _subaccount));
     };
@@ -666,7 +703,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         //     next_page : ?Page; // 1000 utxos per Page
         // }
         var amount : Nat64 = 0;
-        var utxos : [Utxo] = [];
+        var utxos : [Utxo] = []; // BlockHeight DESC
         try {
             countAsyncMessage += 2;
             Cycles.add(GET_UTXOS_COST_CYCLES);
@@ -677,20 +714,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             });
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             var isNewUtxos : Bool = false;
-            var utxosRecorded : [Utxo] = [];
-            switch(_getAccountUtxos(own_address)){
-                case(?(item)){ utxosRecorded := item.2 };
-                case(_){};
-            };
-            for (utxo in utxosResponse.utxos.vals()){
-                if (utxosRecorded.size() == 0 or utxo.height > utxosRecorded[0].height){
+            for (utxo in utxosResponse.utxos.vals()){ // utxosResponse.utxos: BlockHeight DESC
+                if (utxo.height > _accountUtxosLatestHeight(own_address)){
                     utxos := Tools.arrayAppend(utxos, [utxo]);
-                    amount += utxo.value;
+                    // amount += utxo.value;
                     isNewUtxos := true;
                 };
             };
-            _addMinterUtxos(own_address, own_public_key, dpath, utxos);
-            _addAccountUtxos(own_address, own_public_key, dpath, utxos);
+            // _addMinterUtxos(own_address, own_public_key, dpath, utxos);
+            // _addAccountUtxos(own_address, own_public_key, dpath, utxos);
             label getNextPage while (Option.isSome(utxosResponse.next_page) and isNewUtxos){
                 Cycles.add(GET_UTXOS_COST_CYCLES);
                 utxosResponse := await ic.bitcoin_get_utxos({
@@ -698,19 +730,23 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                     network = NETWORK;
                     filter = ?#Page(Option.get(utxosResponse.next_page, [])); 
                 });
-                switch(_getAccountUtxos(own_address)){
-                    case(?(item)){ utxosRecorded := item.2 };
-                    case(_){};
-                };
                 for (utxo in utxosResponse.utxos.vals()){
-                    if (utxosRecorded.size() == 0 or utxo.height > utxosRecorded[0].height){
-                        _addMinterUtxos(own_address, own_public_key, dpath, [utxo]);
-                        _addAccountUtxos(own_address, own_public_key, dpath, [utxo]);
+                    if (utxo.height > _accountUtxosLatestHeight(own_address)){
+                        // _addMinterUtxos(own_address, own_public_key, dpath, [utxo]);
+                        // _addAccountUtxos(own_address, own_public_key, dpath, [utxo]);
                         utxos := Tools.arrayAppend(utxos, [utxo]);
-                        amount += utxo.value;
+                        // amount += utxo.value;
                     }else{
                         break getNextPage;
                     };
+                };
+            };
+            // store utxos
+            for (utxo in Array.reverse(utxos).vals()){
+                if (utxo.height > _accountUtxosLatestHeight(own_address)){
+                    _addMinterUtxos(own_address, own_public_key, dpath, [utxo]);
+                    _addAccountUtxos(own_address, own_public_key, dpath, [utxo]);
+                    amount += utxo.value;
                 };
             };
         }catch(e){
@@ -1129,8 +1165,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             try{
                 if (txi == txIndex and Time.now() > lastTxTime + 600*ns_){
                     lastTxTime := Time.now();
-                    await* _sendBtc(?txi);
                     txIndex += 1;
+                    await* _sendBtc(?txi);
                 }else{
                     await* _sendBtc(?txi);
                 };
@@ -1140,6 +1176,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
 
     private func _reconciliation() : async* (){
         _checkICTCError();
+        await* _initMinterAddress();
         let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
         let feetoAccount = {owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_one) };
         let mainAddress = minter_address;
@@ -1152,7 +1189,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         // nativeBalance >= minterBalance
         // nativeBalance >= ckTotalSupply
         // minterBalance >= ckTotalSupply - ckFeeBalance
-        if (_noOrderInICTC() and (nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100)){ /*config*/
+        if (not(app_debug) and _noOrderInICTC() and (nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100)){ /*config*/
             pause := true;
             ignore _putEvent(#suspend({message = ?"The pool account balance does not match and the system is suspended and pending DAO processing."}), ?_accountId(Principal.fromActor(this), null));
         };
@@ -1192,6 +1229,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
         };
+        await* _initMinterAddress();
         let __start = Time.now();
         let accountId = _accountId(_account.owner, _account.subaccount);
         let icrc1Account : ICRC1.Account = { owner = _account.owner; subaccount = _toSaBlob(_account.subaccount); };
@@ -1203,6 +1241,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         };
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({error_code = 400; error_message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
+        };
+        if (not(_dosCheck(accountId, 10)) or not(_dosCheck(_accountId(msg.caller, null), 10))){
+            return #Err(#GenericError({error_code = 400; error_message = "400: The network is busy, please try again later!"}))
         };
         // latestVisitTime := Trie.put(latestVisitTime, keyp(msg.caller), Principal.equal, _now()).0;
         _setLatestVisitTime(msg.caller);
@@ -1226,7 +1267,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             return #Err(#TemporarilyUnavailable(Error.message(e)))
         };
-        if (utxos.size() > 0){
+        if (utxos.size() > 0 and amount > Nat64.fromNat(ckFixedFee)){
             // mint icBTC
             let fixedFee = Nat64.fromNat(ckFixedFee);
             let value = Nat64.sub(amount, fixedFee);
@@ -1256,6 +1297,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             lastExecutionDuration := Time.now() - __start;
             if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
             return #Ok({ block_index = Nat64.fromNat(thisBlockIndex); amount = value });
+        }else if (utxos.size() > 0 and amount <= Nat64.fromNat(ckFixedFee)){
+            return #Err(#GenericError({ error_message = "Amount below "# Nat.toText(ckFixedFee) #" will be ignored (discarded)"; error_code = 418 }));
         }else{
             return #Err(#NoNewUtxos);
         };
@@ -1288,6 +1331,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({error_code = 400; error_message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
+        if (not(_dosCheck(accountId, 10)) or not(_dosCheck(_accountId(msg.caller, null), 10))){
+            return #Err(#GenericError({error_code = 400; error_message = "400: The network is busy, please try again later!"}))
+        };
         // latestVisitTime := Trie.put(latestVisitTime, keyp(msg.caller), Principal.equal, _now()).0;
         _setLatestVisitTime(msg.caller);
         //update fee
@@ -1299,11 +1345,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             };
         };
         // fetch minter_address
-        if (minter_address == ""){
-            let res = await* _fetchAccountAddress([]);
-            minter_public_key := res.0;
-            minter_address := res.1;
-        };
+        await* _initMinterAddress();
         //update minter otxos
         if (args.amount >= minterRemainingBalance * 9 / 10 or Time.now() > lastFetchUtxosTime + 4*3600*ns_){
             lastFetchUtxosTime := Time.now();
@@ -1317,8 +1359,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             };
         };
         //AmountTooLow
-        if (args.amount < Nat64.max(BTC_MIN_AMOUNT, btcFee * AVG_TX_BYTES / 1000)){
-            return #Err(#AmountTooLow(Nat64.max(BTC_MIN_AMOUNT, btcFee * AVG_TX_BYTES / 1000)));
+        if (args.amount < Nat64.max(BTC_MIN_AMOUNT, Nat64.fromNat(ckFixedFee) + btcFee * AVG_TX_BYTES / 1000)){
+            return #Err(#AmountTooLow(Nat64.max(BTC_MIN_AMOUNT, Nat64.fromNat(ckFixedFee) + btcFee * AVG_TX_BYTES / 1000)));
         };
         let balance = await icBTC.icrc1_balance_of(retrieveIcrc1Account);
         //InsufficientFunds
@@ -1365,8 +1407,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 _pushSendingBtc(thisTxIndex, Nat64.fromNat(thisBlockIndex), args.address, value);
                 if (Time.now() > lastTxTime + 600*ns_){
                     lastTxTime := Time.now();
-                    await* _sendBtc(?thisTxIndex);
                     txIndex += 1;
+                    await* _sendBtc(?thisTxIndex);
                 };
                 return #Ok({block_index = Nat64.fromNat(thisBlockIndex) });
             };
@@ -1388,8 +1430,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (txi == txIndex and _isWaitingToSendBTC(_txIndex)){
             if (Time.now() > lastTxTime + 600*ns_){
                 lastTxTime := Time.now();
-                await* _sendBtc(?txIndex);
+                let thisTxIndex = txIndex;
                 txIndex += 1;
+                await* _sendBtc(?thisTxIndex);
                 return true;
             };
         }else if (_isWaitingToSendBTC(_txIndex)){
@@ -1435,7 +1478,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public query func retrieval_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<EventBlockHeight, Minter.RetrieveStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
-        return ICEvents.trieItems2<Minter.RetrieveStatus>(retrieveBTC, 0, eventBlockIndex, page, size);
+        return ICEvents.trieItems2<Minter.RetrieveStatus>(retrieveBTC, firstBlockIndex, eventBlockIndex, page, size);
     };
     public query func sending_log(_txIndex : ?Nat) : async ?Minter.SendingBtcStatus{
         let txIndex_ = Option.get(_txIndex, txIndex);
@@ -1449,7 +1492,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public query func sending_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<TxIndex, Minter.SendingBtcStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
-        return ICEvents.trieItems2<Minter.SendingBtcStatus>(sendingBTC, 0, txIndex, page, size);
+        return ICEvents.trieItems2<Minter.SendingBtcStatus>(sendingBTC, firstTxIndex, txIndex, page, size);
     };
 
     public query func utxos(_address: Address) : async ?(PubKey, DerivationPath, [Utxo]){
@@ -1553,17 +1596,32 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             ignore _putEvent(#start({message = ?"Starting from DAO"}), ?_accountId(owner, null));
         };
         return true;
-    };
+    }; 
     public shared(msg) func clearEvents(_clearFrom: EventBlockHeight, _clearTo: EventBlockHeight): async (){
         assert(_onlyOwner(msg.caller));
         assert(_clearTo >= _clearFrom);
+        // icEvents
         icEvents := ICEvents.clearEvents<Event>(icEvents, _clearFrom, _clearTo);
+        // retrieveBTC
+        for (i in Iter.range(_clearFrom, _clearTo)){
+            retrieveBTC := Trie.remove(retrieveBTC, keyn(i), Nat.equal).0;
+        };
         firstBlockIndex := _clearTo + 1;
+    };
+    public shared(msg) func clearSendingTxs(_clearFrom: TxIndex, _clearTo: TxIndex): async (){
+        assert(_onlyOwner(msg.caller));
+        assert(_clearTo >= _clearFrom);
+        // sendingBTC
+        for (i in Iter.range(_clearFrom, _clearTo)){
+            sendingBTC := Trie.remove(sendingBTC, keyn(i), Nat.equal).0;
+        };
+        firstTxIndex := _clearTo + 1;
     };
     public shared(msg) func updateMinterBalance(_surplusToFee: Bool) : async {pre: Minter.BalanceStats; post: Minter.BalanceStats; shortfall: Nat}{
         // Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of block confirmations before calling this function after suspending the contract operation.
         assert(_onlyOwner(msg.caller));
         assert(_noOrderInICTC());
+        await* _initMinterAddress();
         let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
         let feetoAccount = {owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_one) };
         let mainAddress = minter_address;
@@ -2116,11 +2174,14 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     //
 
     private func timerLoop() : async (){
-        if (_now() > lastMonitorTime + 2 * 24 * 3600){
+        if (_now() > lastMonitorTime + 24 * 3600){
             if (Trie.size(cyclesMonitor) == 0){
                 cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, icBTC_);
             };
-            cyclesMonitor := await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, 1000000000000 / (if (app_debug) {2} else {1}), 1000000000000 * 10, 0);
+            let monitor = await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, 1000000000000 / (if (app_debug) {2} else {1}), 1000000000000 * 10, 0);
+            if (Trie.size(cyclesMonitor) == Trie.size(monitor)){
+                cyclesMonitor := monitor;
+            };
             lastMonitorTime := _now();
         };
         await* _sendTxs();
@@ -2156,6 +2217,188 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             case(_){};
         };
         timerId := Timer.recurringTimer(#seconds(3600*24), timerLoop);
+    };
+
+    /* ===========================
+      Backup / Recovery section
+    ============================== */
+    /// ## Backup and Recovery
+    /// The backup and recovery functions are not normally used, but are used when canister cannot be upgraded and needs to be reinstalled:
+    /// - call backup() method to back up the data.
+    /// - reinstall cansiter.
+    /// - call recovery() to restore the data.
+    /// Caution:
+    /// - If the data in this canister has a dependency on canister-id, it must be reinstalled in the same canister and cannot be migrated to a new canister.
+    /// - Normal access needs to be stopped during backup and recovery, otherwise the data may be contaminated.
+    /// - Backup and recovery operations have been categorized by variables, and each operation can only target one category of data, so multiple operations are required to complete the backup and recovery of all data.
+    /// - The backup and recovery operations are not paged for single-variable datasets. If you encounter a failure due to large data size, please try the following:
+    ///     - Calling canister's cleanup function or configuration will delete stale data for some variables.
+    ///     - Backup and recovery of non-essential data can be ignored.
+    ///     - Query the necessary data through other query functions, and then call recovery() to restore the data.
+    ///     - Abandon this solution and seek other data recovery solutions.
+
+    // type Toid = SagaTM.Toid;
+    // type Ttid = SagaTM.Ttid;
+    type Order = SagaTM.Order;
+    type Task = SagaTM.Task;
+    type SagaData = Backup.SagaData;
+    type BackupRequest = Backup.BackupRequest;
+    type BackupResponse = Backup.BackupResponse;
+
+    /// Backs up data of the specified `BackupRequest` classification, and the result is wrapped using the `BackupResponse` type.
+    public shared(msg) func backup(_request: BackupRequest) : async BackupResponse{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData){
+                return #otherData({
+                    minterRemainingBalance = minterRemainingBalance;
+                    totalBtcFee = totalBtcFee;
+                    totalBtcReceiving = totalBtcReceiving;
+                    totalBtcSent = totalBtcSent;
+                    feeBalance = feeBalance;
+                    txInProcess = txInProcess;
+                    txIndex = txIndex;
+                    firstTxIndex = firstTxIndex;
+                    eventBlockIndex = eventBlockIndex;
+                    firstBlockIndex = firstBlockIndex;
+                    ictc_admins = ictc_admins;
+                });
+            };
+            case(#minterUtxos){
+                return #minterUtxos(List.toArray(minterUtxos.0), List.toArray(minterUtxos.1));
+            };
+            case(#accountUtxos){
+                return #accountUtxos(Trie.toArray<Address, (PubKey, DerivationPath, [Utxo]), (Address, (PubKey, DerivationPath, [Utxo]))>(accountUtxos, 
+                    func (k: Address, v: (PubKey, DerivationPath, [Utxo])): (Address, (PubKey, DerivationPath, [Utxo])){
+                        let utxos: [Utxo] = (if (v.2.size() > 0){ [v.2[0]] }else{ [] });
+                        return (k, (v.0, v.1, utxos));
+                    }));
+            };
+            case(#retrieveBTC){
+                return #retrieveBTC(Trie.toArray<EventBlockHeight, Minter.RetrieveStatus, (EventBlockHeight, Minter.RetrieveStatus)>(retrieveBTC, 
+                    func (k: EventBlockHeight, v: Minter.RetrieveStatus): (EventBlockHeight, Minter.RetrieveStatus){
+                        return (k, v);
+                    }));
+            };
+            case(#sendingBTC){
+                return #sendingBTC(Trie.toArray<TxIndex, Minter.SendingBtcStatus, (TxIndex, Minter.SendingBtcStatus)>(sendingBTC, 
+                    func (k: TxIndex, v: Minter.SendingBtcStatus): (TxIndex, Minter.SendingBtcStatus){
+                        return (k, v);
+                    }));
+            };
+            case(#icrc1WasmHistory){
+                let icrc1Wasm: [(wasm: [Nat8], version: Text)] = (if (icrc1WasmHistory.size() > 0){ [icrc1WasmHistory[0]] }else{ [] });
+                return #icrc1WasmHistory(icrc1Wasm);
+            };
+            case(#kyt_accountAddresses){
+                return #kyt_accountAddresses(Trie.toArray<AccountId, [KYT.ChainAccount], (AccountId, [KYT.ChainAccount])>(kyt_accountAddresses, 
+                    func (k: AccountId, v: [KYT.ChainAccount]): (AccountId, [KYT.ChainAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_addressAccounts){
+                return #kyt_addressAccounts(Trie.toArray<Address, [KYT.ICAccount], (Address, [KYT.ICAccount])>(kyt_addressAccounts, 
+                    func (k: Address, v: [KYT.ICAccount]): (Address, [KYT.ICAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_txAccounts){
+                return #kyt_txAccounts(Trie.toArray<KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)], (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)])>(kyt_txAccounts, 
+                    func (k: KYT.HashId, v: [(KYT.ChainAccount, KYT.ICAccount)]): (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)]){
+                        return (k, v);
+                    }));
+            };
+            case(#icEvents){
+                return #icEvents(Trie.toArray<Minter.BlockHeight, (Minter.Event, Timestamp), (Minter.BlockHeight, (Minter.Event, Timestamp))>(icEvents, 
+                    func (k: Minter.BlockHeight, v: (Minter.Event, Timestamp)): (Minter.BlockHeight, (Minter.Event, Timestamp)){
+                        return (k, v);
+                    }));
+            };
+            case(#icAccountEvents){
+                return #icAccountEvents(Trie.toArray<AccountId, List.List<Minter.BlockHeight>, (AccountId, [Minter.BlockHeight])>(icAccountEvents, 
+                    func (k: AccountId, v: List.List<Minter.BlockHeight>): (AccountId, [Minter.BlockHeight]){
+                        return (k, List.toArray(v));
+                    }));
+            };
+            case(#cyclesMonitor){
+                return #cyclesMonitor(Trie.toArray<Principal, Nat, (Principal, Nat)>(cyclesMonitor, 
+                    func (k: Principal, v: Nat): (Principal, Nat){
+                        return (k, v);
+                    }));
+            };
+        };
+    };
+
+    /// Restore `BackupResponse` data to the canister's global variable.
+    public shared(msg) func recovery(_request: BackupResponse) : async Bool{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData(data)){
+                minterRemainingBalance := data.minterRemainingBalance;
+                totalBtcFee := data.totalBtcFee;
+                totalBtcReceiving := data.totalBtcReceiving;
+                totalBtcSent := data.totalBtcSent;
+                feeBalance := data.feeBalance;
+                txInProcess := data.txInProcess;
+                txIndex := data.txIndex;
+                firstTxIndex := data.firstTxIndex;
+                eventBlockIndex := data.eventBlockIndex;
+                firstBlockIndex := data.firstBlockIndex;
+                ictc_admins := data.ictc_admins;
+            };
+            case(#minterUtxos(data)){
+                minterUtxos := (List.fromArray(data.0), List.fromArray(data.1));
+            };
+            case(#accountUtxos(data)){
+                for ((k, v) in data.vals()){
+                    accountUtxos := Trie.put(accountUtxos, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#retrieveBTC(data)){
+                for ((k, v) in data.vals()){
+                    retrieveBTC := Trie.put(retrieveBTC, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#sendingBTC(data)){
+                for ((k, v) in data.vals()){
+                    sendingBTC := Trie.put(sendingBTC, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#icrc1WasmHistory(data)){
+                icrc1WasmHistory := data;
+            };
+            case(#kyt_accountAddresses(data)){
+                for ((k, v) in data.vals()){
+                    kyt_accountAddresses := Trie.put(kyt_accountAddresses, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#kyt_addressAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_addressAccounts := Trie.put(kyt_addressAccounts, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#kyt_txAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_txAccounts := Trie.put(kyt_txAccounts, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#icEvents(data)){
+                for ((k, v) in data.vals()){
+                    icEvents := Trie.put(icEvents, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#icAccountEvents(data)){
+                for ((k, v) in data.vals()){
+                    icAccountEvents := Trie.put(icAccountEvents, keyb(k), Blob.equal, List.fromArray(v)).0;
+                };
+            };
+            case(#cyclesMonitor(data)){
+                for ((k, v) in data.vals()){
+                    cyclesMonitor := Trie.put(cyclesMonitor, keyp(k), Principal.equal, v).0;
+                };
+            };
+        };
+        return true;
     };
 
 };
