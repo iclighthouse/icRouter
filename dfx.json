@@ -1,11 +1,11 @@
 {
     "canisters": {
       "icBTCMinterTest": {
-        "main": "./cross-chain/btc/src/icBTCMinterTest.mo",
+        "main": "./btc/src/icBTCMinter.mo",
         "type": "motoko"
       },
       "icBTCMinter": {
-        "main": "./cross-chain/btc/src/icBTCMinter.mo",
+        "main": "./btc/src/icBTCMinter.mo",
         "type": "motoko"
       },
       "icToken": {
@@ -13,27 +13,15 @@
         "type": "motoko"
       },
       "icETHMinter": {
-        "main": "./cross-chain/eth/src/icETHMinter.mo",
+        "main": "./eth/src/icETHMinter.mo",
         "type": "motoko"
       },
       "icETHMinterTest": {
-        "main": "./cross-chain/eth/src/icETHMinterTest.mo",
+        "main": "./eth/src/icETHMinter.mo",
         "type": "motoko"
       },
       "icETHMinterTest2": {
-        "main": "./cross-chain/eth/src/icETHMinterTest.mo",
-        "type": "motoko"
-      },
-      "Router": {
-        "main": "./dex-router/src/DexRouter.mo",
-        "type": "motoko"
-      },
-      "RouterMain": {
-        "main": "./dex-router/src/DexRouter.mo",
-        "type": "motoko"
-      },
-      "RouterTest": {
-        "main": "./dex-router/src/DexRouter.mo",
+        "main": "./eth/src/icETHMinter.mo",
         "type": "motoko"
       }
     },

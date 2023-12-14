@@ -68,8 +68,8 @@ import Backup "lib/BackupTypes";
 //     dex_pair: ?Principal;
 //     mode: Mode;
 //   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
-shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
+// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}, true/false
+shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: Bool) = this {
     // assert(initArgs.ecdsa_key_name == "key_1"); 
     // assert(initArgs.btc_network == #Mainnet); 
     assert(Option.get(initArgs.min_confirmations, 0:Nat32) > 3); /*config*/
@@ -119,7 +119,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     let AVG_TX_BYTES : Nat64 = 450; /*config*/
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     
-    private var app_debug : Bool = false; /*config*/
+    private stable var app_debug : Bool = enDebug; // Cannot be modified
     private let version_: Text = "0.2.4"; /*config*/
     private let ns_: Nat = 1000000000;
     private var pause: Bool = initArgs.mode == #ReadOnly;

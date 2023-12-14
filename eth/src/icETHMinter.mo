@@ -71,10 +71,10 @@ import Backup "lib/BackupTypes";
 // 4. setCkTokenWasm() 
 // 5. launchToken() 
 // 6. setTokenDexPair() 
-// Production confirmations: 65 - 96
-// "Ethereum", "ETH", 18, 12, record{min_confirmations=opt 72; rpc_confirmations = 4; utils_canister_id = principal "qphl7-qqaaa-aaaar-qacba-cai"; deposit_method=3}
-shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs) = this {
-    assert(Option.get(initArgs.min_confirmations, 0) >= 10); /*config*/
+// Production confirmations: 64 - 96
+// "Ethereum/Goerli", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 4; utils_canister_id = principal "qphl7-qqaaa-aaaar-qacba-cai"; deposit_method=3}, true/false
+shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs, enDebug: Bool) = this {
+    assert(Option.get(initArgs.min_confirmations, 0) >= 64); /*config*/
 
     type Cycles = Minter.Cycles;
     type Timestamp = Minter.Timestamp; // Nat, seconds
@@ -134,11 +134,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let MAX_PENDING_RETRIEVALS : Nat = 50; /*config*/
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 648000; // 90 days
     
-    private var app_debug : Bool = false; /*config*/
+    private stable var app_debug : Bool = enDebug; // Cannot be modified
     private let version_: Text = "0.8.20"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
-    private stable var minConfirmations : Nat = Option.get(initArgs.min_confirmations, 15);
+    private stable var minConfirmations : Nat = Option.get(initArgs.min_confirmations, 64);
     private stable var minRpcConfirmations : Nat = initArgs.rpc_confirmations;
     private stable var paused: Bool = true;
     private stable var ckNetworkName: Text = initNetworkName;
