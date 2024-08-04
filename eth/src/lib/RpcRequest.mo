@@ -3,15 +3,9 @@ import Blob "mo:base/Blob";
 import Nat "mo:base/Nat";
 import Int "mo:base/Int";
 import Time "mo:base/Time";
-import Array "mo:base/Array";
-import Iter "mo:base/Iter";
 import Option "mo:base/Option";
-import Error "mo:base/Error";
-import Cycles "mo:base/ExperimentalCycles";
-import IC "mo:icl/IC";
 import Minter "mo:icl/icETHMinter";
 import Tools "mo:icl/Tools";
-import RpcCaller "RpcCaller";
 
 module{
     type AccountId = Blob;
@@ -34,7 +28,6 @@ module{
     /// Consensus process data cache for RPC requests (deleted after consensus is formed, or 12 hours after last update)
     public type TrieRpcRequestConsensusTemps = Trie.Trie<RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp)>;
 
-    private let RPC_AGENT_CYCLES : Nat = 200_000_000;
     private let ns_: Nat = 1000000000;
     private func keyb(t: Blob) : Trie.Key<Blob> { return { key = t; hash = Blob.hash(t) }; };
     private func keyn(t: Nat) : Trie.Key<Nat> { return { key = t; hash = Tools.natHash(t) }; };
@@ -88,17 +81,17 @@ module{
         });
         return (data, result, maxNum, newConfirmations);
     };
-    private func getRpcUrl(_data: TrieRpcProviders, _offset: Nat) : (keeper: AccountId, url: Text, total:Nat){
-        let rpcs = Array.filter(Iter.toArray(Trie.iter<AccountId, RpcProvider>(_data)), func (t: (AccountId, RpcProvider)): Bool{
-            t.1.status == #Available;
-        });
-        let length = rpcs.size();
-        let rpc = rpcs[_offset % length];
-        return (rpc.0, rpc.1.url, length);
-    };
+    // private func getRpcUrl(_data: TrieRpcProviders, _offset: Nat) : (keeper: AccountId, url: Text, total:Nat){
+    //     let rpcs = Array.filter(Iter.toArray(Trie.iter<AccountId, RpcProvider>(_data)), func (t: (AccountId, RpcProvider)): Bool{
+    //         t.1.status == #Available;
+    //     });
+    //     let length = rpcs.size();
+    //     let rpc = rpcs[_offset % length];
+    //     return (rpc.0, rpc.1.url, length);
+    // };
 
     /// Jumping incremental values from positions 0/3, 1/3, 2/3 (avoiding consecutive values)
-    public func treeSegIndex(i: Nat, n: Nat) : Nat{
+    public func threeSegIndex(i: Nat, n: Nat) : Nat{
         var r = 0;
         if (n >= 3 and i % 3 == 1){
             r := n / 3 + i / 3;
@@ -215,7 +208,7 @@ module{
                     recentPersistentErrors = ?recentPersistentErrors; 
                 };
                 var status = provider.status;
-                if (recentPersistentErrors >= 10 or (healthCheck.calls >= 20 and healthCheck.errors * 100 / healthCheck.calls > 30)){
+                if (recentPersistentErrors >= 10 or (healthCheck.calls >= 20 and healthCheck.errors * 100 / healthCheck.calls > 70)){
                     status := #Unavailable;
                 };
                 data := Trie.put(data, keyb(_keeper), Blob.equal, {

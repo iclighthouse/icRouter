@@ -122,6 +122,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     private stable var app_debug : Bool = enDebug; // Cannot be modified
     private let version_: Text = "0.2.4"; /*config*/
     private let ns_: Nat = 1000000000;
+    private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private var pause: Bool = initArgs.mode == #ReadOnly;
     private stable var owner: Principal = installMsg.caller;
     private stable var ic_: Principal = Principal.fromText("aaaaa-aa"); 
@@ -278,6 +279,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     private func _checkAsyncMessageLimit() : Bool{
         return _asyncMessageSize() < 400; /*config*/
     };
+    // cycles limit
+    private func _checkCycles(): Bool{
+        return Cycles.balance() > minCyclesBalance;
+    };
+
     private func keyb(t: Blob) : Trie.Key<Blob> { return { key = t; hash = Blob.hash(t) }; };
     private func keyt(t: Text) : Trie.Key<Text> { return { key = t; hash = Text.hash(t) }; };
     private func keyp(t: Principal) : Trie.Key<Principal> { return { key = t; hash = Principal.hash(t) }; };
@@ -1229,6 +1235,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
         };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
+        };
         await* _initMinterAddress();
         let __start = Time.now();
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -1315,6 +1325,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         if (Array.size(txInProcess) > 50){
             return #Err(#GenericError({error_code = 401; error_message = "401: Too many transactions waiting to be processed, please try again later."}))
@@ -1425,6 +1439,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         let txi = Option.get(_txIndex, txIndex);
         if (txi == txIndex and _isWaitingToSendBTC(_txIndex)){
@@ -1714,7 +1732,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     };
     public shared(msg) func setCkTokenWasm(_wasm: Blob, _version: Text) : async (){
         assert(_onlyOwner(msg.caller));
-        assert(_version != _getLatestIcrc1Wasm().1);
+        assert(Option.isNull(Array.find(icrc1WasmHistory, func (t: ([Nat8], Text)): Bool{ _version == t.1 })));
         icrc1WasmHistory := Tools.arrayAppend([(Blob.toArray(_wasm), _version)], icrc1WasmHistory);
         if (icrc1WasmHistory.size() > 32){
             icrc1WasmHistory := Tools.slice(icrc1WasmHistory, 0, ?31);
@@ -1727,8 +1745,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     };
     public query func getCkTokenWasmHistory(): async [(Text, Nat)]{
         return Array.map<([Nat8], Text), (Text, Nat)>(icrc1WasmHistory, func (t: ([Nat8], Text)): (Text, Nat){
-            let wasm = _getLatestIcrc1Wasm();
-            return (wasm.1, wasm.0.size());
+            return (t.1, t.0.size());
         });
     };
     public shared(msg) func launchToken(_args: {

@@ -1,5 +1,5 @@
 import Time "mo:base/Time";
-import SagaTM "../ICTC/SagaTM";
+import SagaTM "mo:ictc/SagaTM";
 import Minter "mo:icl/icETHMinter";
 
 module {
@@ -14,18 +14,18 @@ module {
     public type Nonce = Nat;
     public type Toid = SagaTM.Toid;
     public type Ttid = SagaTM.Ttid;
-    public type Order = SagaTM.Order;
-    public type Task = SagaTM.Task;
-    public type SagaData = {
+    public type Order<T> = SagaTM.Order<T>;
+    public type Task<T> = SagaTM.Task<T>;
+    public type SagaData<T> = {
         autoClearTimeout: Int; 
         index: Nat; 
         firstIndex: Nat; 
-        orders: [(Toid, Order)]; 
+        orders: [(Toid, Order<T>)]; 
         aliveOrders: [(Toid, Time.Time)]; 
         taskEvents: [(Toid, [Ttid])];
         actuator: {
-            tasks: ([(Ttid, Task)], [(Ttid, Task)]); 
-            taskLogs: [(Ttid, SagaTM.TaskEvent)]; 
+            tasks: ([(Ttid, Task<T>)], [(Ttid, Task<T>)]); 
+            taskLogs: [(Ttid, SagaTM.TaskEvent<T>)]; 
             errorLogs: [(Nat, SagaTM.ErrorLog)]; 
             callees: [(SagaTM.Callee, SagaTM.CalleeStatus)]; 
             index: Nat; 
@@ -66,9 +66,10 @@ module {
         #blockEvents;
         #accountEvents; // **
         #cyclesMonitor;
+        #sagaData: {#All; #Base};
     };
 
-    public type BackupResponse = {
+    public type BackupResponse<T> = {
         #otherData: {
             countMinting: Nat;
             totalMinting: Wei;
@@ -109,5 +110,6 @@ module {
         #blockEvents: [(BlockHeight, (Minter.Event, Timestamp))];
         #accountEvents: [(AccountId, [BlockHeight])]; // **
         #cyclesMonitor: [(Principal, Nat)];
+        #sagaData: SagaData<T>;
     };
 };

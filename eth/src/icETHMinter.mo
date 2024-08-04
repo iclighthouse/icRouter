@@ -14,37 +14,28 @@ import Option "mo:base/Option";
 import Blob "mo:base/Blob";
 import Nat "mo:base/Nat";
 import Nat8 "mo:base/Nat8";
-import Nat32 "mo:base/Nat32";
 import Nat64 "mo:base/Nat64";
 import Int "mo:base/Int";
-import Int32 "mo:base/Int32";
-import Int64 "mo:base/Int64";
 import Float "mo:base/Float";
 import Iter "mo:base/Iter";
 import List "mo:base/List";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
-import Deque "mo:base/Deque";
-import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
 import ICRC1 "mo:icl/ICRC1";
 import DRC20 "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
 import Binary "mo:icl/Binary";
-import Hex "mo:icl/Hex";
 import Tools "mo:icl/Tools";
-import SagaTM "./ICTC/SagaTM";
+import SagaTM "mo:ictc/SagaTM";
 import DRC207 "mo:icl/DRC207";
 import Error "mo:base/Error";
-import Debug "mo:base/Debug";
 import Result "mo:base/Result";
 import ICECDSA "lib/ICECDSA";
 import Minter "mo:icl/icETHMinter";
 import ETHUtils "mo:icl/ETHUtils";
-// import ETHRPC "lib/ETHRPC";
 import ETHCrypto "lib/ETHCrypto";
 import ABI "lib/ABI";
-import JSON "mo:json/JSON";
 import Timer "mo:base/Timer";
 import IC "mo:icl/IC";
 import ICEvents "mo:icl/ICEvents";
@@ -61,18 +52,18 @@ import Backup "lib/BackupTypes";
 // InitArgs = {
 //     min_confirmations : ?Nat
 //     rpc_confirmations: Nat;
-//     utils_canister_id: Principal;
+//     tx_type: {#EIP1559; #EIP2930; #Legacy};
 //     deposit_method: Nat8;
 //   };
 // Deploy:
 // 1. Deploy minter canister 
-// 2. setKeeper() and keeper_setRpc()
+// 2. addRpcWhitelist(domain)  setKeeper() and keeper_set_rpc()
 // 3. sync() and setPause(false)
 // 4. setCkTokenWasm() 
 // 5. launchToken() 
 // 6. setTokenDexPair() 
-// Production confirmations: 64 - 96
-// "Ethereum/Goerli", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 4; utils_canister_id = principal "qphl7-qqaaa-aaaar-qacba-cai"; deposit_method=3}, true/false
+// Min confirmations in Production: 64 - 96
+// "Ethereum/Sepolia", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true/false
 shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs, enDebug: Bool) = this {
     assert(Option.get(initArgs.min_confirmations, 0) >= 64); /*config*/
 
@@ -123,6 +114,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     type RpcRequestConsensus = Minter.RpcRequestConsensus;
     type MinterInfo = Minter.MinterInfo;
     type TrieList<K, V> = Minter.TrieList<K, V>; // {data: [(K, V)]; total: Nat; totalPage: Nat; };
+    type EthGas = { gasPrice: Wei; gasLimit: Nat; maxFee: Wei;};
+    type CkFee = {eth: Wei; token: Wei};
+    type CustomCallType = {
+        #getNonce: (TxIndex, ?[Nat]);
+        #createTx: (TxIndex);
+        #createTx_comp: (TxIndex);
+        #signTx: (TxIndex);
+        #sendTx: (TxIndex);
+        #syncTx: (TxIndex, Bool);
+        #validateTx: (TxHash);
+    };
 
     let KEY_NAME : Text = "key_1";
     let ECDSA_SIGN_CYCLES : Cycles = 22_000_000_000;
@@ -132,33 +134,35 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let MIN_VISIT_INTERVAL : Nat = 6; //seconds
     // let GAS_PER_BYTE : Nat = 68; // gas
     let MAX_PENDING_RETRIEVALS : Nat = 50; /*config*/
-    let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 648000; // 90 days
+    let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.8.20"; /*config*/
+    private let version_: Text = "0.9.0"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
+    private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
     private stable var minConfirmations : Nat = Option.get(initArgs.min_confirmations, 64);
     private stable var minRpcConfirmations : Nat = initArgs.rpc_confirmations;
     private stable var paused: Bool = true;
+    private stable var ckTxType = Option.get(initArgs.tx_type, #EIP1559);
     private stable var ckNetworkName: Text = initNetworkName;
     private stable var ckNetworkSymbol: Text = initSymbol;
     private stable var ckNetworkDecimals: Nat8 = initDecimals;
     private stable var ckNetworkBlockSlot: Nat = initBlockSlot;
     private stable var owner: Principal = installMsg.caller;
     private stable var depositMethod: Nat8 = initArgs.deposit_method;
-    // private stable var rpc_: Principal = initArgs.rpc_canister_id; //3ondx-siaaa-aaaam-abf3q-cai
-    private stable var utils_: Principal = initArgs.utils_canister_id; 
+    private let txTaskAttempts: Nat = 30;
+    
     private stable var ic_: Principal = Principal.fromText("aaaaa-aa"); 
     private let eth_: Text = "0x0000000000000000000000000000000000000000";
     private let sa_zero : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; // Main account
     private let sa_one : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]; // Fees account
     private let sa_two : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2]; // Fee Swap
     private let ic : ICECDSA.Self = actor(Principal.toText(ic_));
-    // private let rpc : ETHRPC.Self = actor(Principal.toText(rpc_));
-    private let utils : ETHUtils.Self = actor(Principal.toText(utils_));
+    private let ecContext = ETHCrypto.getEcContext();
     private var blackhole_: Text = "7hdtw-jqaaa-aaaak-aaccq-cai";
     private stable var icrc1WasmHistory: [(wasm: [Nat8], version: Text)] = [];
+    private stable var rpcDomainWhitelist: [Text] = [];
 
     private stable var countMinting: Nat = 0;
     private stable var totalMinting: Wei = 0; // ETH
@@ -176,25 +180,21 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private stable var withdrawals = Trie.empty<AccountId, List.List<TxIndex>>(); // Persistent storage
     private stable var pendingRetrievals = List.nil<TxIndex>(); // pending temp
     private stable var txIndex : TxIndex = 0;
-    private stable var transactions = Trie.empty<TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)>(); // Persistent storage
+    private stable var transactions = Trie.empty<TxIndex, (tx: Minter.TxStatus, ts: Timestamp, coveredTime: ?Timestamp)>(); // Persistent storage
     private stable var depositTxns = Trie.empty<TxHashId, (tx: DepositTxn, updatedTime: Timestamp)>();    // Method 2: Persistent storage
     private stable var pendingDepositTxns = Trie.empty<TxHashId, Minter.PendingDepositTxn>();    // Method 2: pending temp
-    private stable var lastUpdateTxsTime: Timestamp = 0;
-    private stable var lastUpdateMode2TxnTime: Timestamp = 0;
     private stable var lastGetGasPriceTime: Timestamp = 0;
     private var getGasPriceIntervalSeconds: Timestamp = 10 * 60;/*config*/
     private stable var lastUpdateTokenPriceTime: Timestamp = 0;
     private var getTokenPriceIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {4 * 3600};/*config*/
     private stable var lastConvertFeesTime: Timestamp = 0;
     private var convertFeesIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {8 * 3600};/*config*/
-    // private stable var lastHealthinessSlotTime: Timestamp = 0;
     private var healthinessIntervalSeconds: Timestamp = if (app_debug) {2 * 3600} else {7 * 24 * 3600};/*config*/
     private stable var countRejections: Nat = 0;
     private stable var lastExecutionDuration: Int = 0;
     private stable var maxExecutionDuration: Int = 0;
     private stable var lastSagaRunningTime : Time.Time = 0;
     private stable var countAsyncMessage : Nat = 0;
-    // private stable var countICTCBlockings: Nat = 0;
 
     private stable var ck_chainId : Nat = 1; 
     private stable var ck_ethBlockNumber: (blockheight: BlockHeight, time: Timestamp) = (0, 0); 
@@ -279,6 +279,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private func _checkAsyncMessageLimit() : Bool{
         return _asyncMessageSize() < 390; /*config*/
     };
+    // cycles limit
+    private func _checkCycles(): Bool{
+        return Cycles.balance() > minCyclesBalance;
+    };
     
     private func _toSaBlob(_sa: ?Sa) : ?Blob{
         switch(_sa){
@@ -336,6 +340,29 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     }; 
+    private func _txTaskInterval() : Int{
+        return (ckNetworkBlockSlot * minConfirmations * 2 / txTaskAttempts) * 1_000_000_000;
+    };
+
+    private func _isRpcDomainWhitelist(_rpcUrl: Text) : Bool{
+        let rpcDomain = _getRpcDomain(_rpcUrl);
+        return Option.isSome(Array.find(rpcDomainWhitelist, func (t: Text): Bool{ t == rpcDomain }));
+    };
+    private func _addRpcDomainWhitelist(_rpcDomain: Text) : (){
+        _removeRpcDomainWhitelist(_rpcDomain);
+        rpcDomainWhitelist := Tools.arrayAppend(rpcDomainWhitelist, [_toLower(_rpcDomain)]);
+    };
+    private func _removeRpcDomainWhitelist(_rpcDomain: Text) : (){
+        rpcDomainWhitelist := Array.filter(rpcDomainWhitelist, func (t: Text): Bool{ t != _toLower(_rpcDomain) });
+    };
+    private func _getRpcDomain(_rpcUrl: Text) : Text{
+        return RpcCaller.getHost(_toLower(_rpcUrl));
+    };
+    private func _removeProviders(_rpcDomain: Text) : (){
+        ck_rpcProviders := Trie.filter(ck_rpcProviders, func (k: AccountId, v: RpcProvider): Bool{
+            _getRpcDomain(v.url) != _toLower(_rpcDomain)
+        });
+    };
 
     // Local tasks
     private func _local_getNonce(_txi: TxIndex, _toids: ?[Nat]) : async* {txi: Nat; address: EthAddress; nonce: Nonce}{
@@ -347,7 +374,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     var nonce : Nat = 0;
                     if (tx.txType == #Withdraw or tx.txType == #DepositGas){ 
                         accountId := _accountId(Principal.fromActor(this), null);
-                        let (mainAddress, mainNonce) = _getEthAddressQuery(accountId);
+                        let (_mainAddress, mainNonce) = _getEthAddressQuery(accountId);
                         nonce := mainNonce;
                     }else{
                         nonce := await* _fetchAccountNonce(tx.from, #pending);
@@ -377,70 +404,31 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _local_createTx(_txi: TxIndex) : async* {txi: Nat; rawTx: [Nat8]; txHash: TxHash}{
-        //let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
                 if (tx.status == #Building){
-                    var chainId_ = ck_chainId;
-                    // if (testMainnet){
-                    //     chainId_ := 1;
-                    // };
-                    let accountId = _accountId(tx.account.owner, tx.account.subaccount);
                     let isERC20 = tx.tokenId != eth_;
-                    var txObj: Transaction = #EIP1559({
-                        to = Option.get(ABI.fromHex(tx.to), []);
-                        value = ABI.natABIEncode(tx.amount);
-                        max_priority_fee_per_gas = ABI.natABIEncode(Nat.max(tx.fee.gasPrice / 10, 100000000)); 
-                        data = [];
-                        sign = null;
-                        max_fee_per_gas = ABI.natABIEncode(tx.fee.gasPrice);
-                        chain_id = Nat64.fromNat(chainId_);
-                        nonce = ABI.natABIEncode(Option.get(tx.nonce, 0));
-                        gas_limit = ABI.natABIEncode(tx.fee.gasLimit);
-                        access_list = [];
-                    });
-                    if (isERC20){
-                        txObj := #EIP1559({
-                            to = Option.get(ABI.fromHex(tx.tokenId), []);
-                            value = ABI.natABIEncode(0);
-                            max_priority_fee_per_gas = ABI.natABIEncode(Nat.max(tx.fee.gasPrice / 10, 100000000)); 
-                            data = ABI.encodeErc20Transfer(tx.to, tx.amount);
-                            sign = null;
-                            max_fee_per_gas = ABI.natABIEncode(tx.fee.gasPrice);
-                            chain_id = Nat64.fromNat(chainId_);
-                            nonce = ABI.natABIEncode(Option.get(tx.nonce, 0));
-                            gas_limit = ABI.natABIEncode(tx.fee.gasLimit);
-                            access_list = [];
-                        });
-                    };
+                    var txObj: Transaction = ETHCrypto.buildTransaction(tx, ckTxType, ck_chainId, isERC20, null, null);
                     try{
                         // countAsyncMessage += 1;
                         let rawTx = ETHCrypto.rlpEncode(txObj); 
                         let txHash = ETHCrypto.sha3(rawTx);
-                        // switch(await utils.create_transaction(txObj)){
-                        //     case(#Ok(rawTx, txHash)){
-                                // countAsyncMessage -= Nat.min(1, countAsyncMessage);
-                                _updateTx(_txi, {
-                                    fee = null;
-                                    amount = null;
-                                    nonce = null;
-                                    toids = null;
-                                    txHash = null; // ?ABI.toHex(txHash);
-                                    tx = ?txObj;
-                                    rawTx = ?(rawTx, txHash);
-                                    signedTx = null;
-                                    receipt = null;
-                                    rpcRequestId = null;
-                                    kytRequestId = null;
-                                    status = ?#Signing;
-                                    ts = ?_now();
-                                }, null);
-                                return {txi = _txi; rawTx = rawTx; txHash = ABI.toHex(txHash)};
-                        //     };
-                        //     case(#Err(e)){
-                        //         throw Error.reject("401: Error: "#e);
-                        //     };
-                        // };
+                            _updateTx(_txi, {
+                                fee = null;
+                                amount = null;
+                                nonce = null;
+                                toids = null;
+                                txHash = null; // ?ABI.toHex(txHash);
+                                tx = ?txObj;
+                                rawTx = ?(rawTx, txHash);
+                                signedTx = null;
+                                receipt = null;
+                                rpcRequestId = null;
+                                kytRequestId = null;
+                                status = ?#Signing;
+                                ts = ?_now();
+                            }, null);
+                            return {txi = _txi; rawTx = rawTx; txHash = ABI.toHex(txHash)};
                     }catch(e){
                         // countAsyncMessage -= Nat.min(1, countAsyncMessage);
                         throw Error.reject("Calling error: "# Error.message(e)); 
@@ -453,7 +441,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _local_createTx_comp(_txi: TxIndex) : async* (){
-        //let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
                 if (tx.status == #Signing){
@@ -479,8 +466,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             case(_){ throw Error.reject("402: The transaction record does not exist!"); };
         };
     };
-    private func _local_signTx(_txi: TxIndex) : async* {txi: Nat; signature: Blob; rawTx: [Nat8]; txHash: TxHash}{
-        //let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
+    private func _local_signTx(_txi: TxIndex) : async* {txi: Nat; signature: [Nat8]; rawTx: [Nat8]; txHash: TxHash}{
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
                 if (tx.status == #Signing or tx.status == #Sending or tx.status == #Pending){
@@ -492,57 +478,35 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         userAddress := tx.to;
                     };
                     switch(tx.tx, tx.rawTx){
-                        case(?#EIP1559(txObj), ?(raw, hash)){
-                            let signature = await* _sign(dpath, Blob.fromArray(hash));
-                            let signValues = await* ETHCrypto.convertSignature(Blob.toArray(signature), raw, tx.from, ck_chainId, utils_);
-                            let txObjNew: Transaction = #EIP1559({
-                                to = txObj.to;
-                                value = txObj.value;
-                                max_priority_fee_per_gas = txObj.max_priority_fee_per_gas; 
-                                data = txObj.data;
-                                sign = ?{r = signValues.r; s = signValues.s; v = signValues.v; from = ABI.fromHex(tx.from); hash = hash };
-                                max_fee_per_gas = txObj.max_fee_per_gas;
-                                chain_id = txObj.chain_id;
-                                nonce = txObj.nonce;
-                                gas_limit = txObj.gas_limit;
-                                access_list = txObj.access_list;
-                            });
-                            // 0x2 || RLP([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS])
-                            // switch(await utils.encode_signed_transaction(txObjNew)){
-                            //     case(#Ok(signedTx, signedHash)){
-                                    let signedTx = ETHCrypto.rlpEncode(txObjNew);
-                                    let signedHash = ETHCrypto.sha3(signedTx);
-                                    // var signedHash : [Nat8] = []; 
-                                    // try{
-                                    //     // countAsyncMessage += 1;
-                                    //     signedHash := await utils.keccak256(signedTx);
-                                    //     // countAsyncMessage -= Nat.min(1, countAsyncMessage);
-                                    // }catch(e){
-                                    //     // countAsyncMessage -= Nat.min(1, countAsyncMessage);
-                                    //     throw Error.reject("Calling error: "# Error.message(e)); 
-                                    // };
-                                    _updateTx(_txi, {
-                                        fee = null;
-                                        amount = null;
-                                        nonce = null;
-                                        toids = null;
-                                        txHash = ?ABI.toHex(signedHash);
-                                        tx = ?txObjNew;
-                                        rawTx = null;
-                                        signedTx = ?(signedTx, signedHash);
-                                        receipt = null;
-                                        rpcRequestId = null;
-                                        kytRequestId = null;
-                                        status = ?#Sending;
-                                        ts = ?_now();
-                                    }, null);
-                                    _putTxAccount(tx.tokenId, ABI.toHex(signedHash), userAddress, tx.account);
-                                    return {txi = _txi; signature = signature; rawTx = signedTx; txHash = ABI.toHex(signedHash)};
-                                // };
-                                // case(#Err(e)){
-                                //     throw Error.reject("401: Error: "#e);
-                                // };
-                            // };
+                        case(?txn, ?(msgRaw, hash)){
+                            let signature = await* _sign(dpath, hash);
+                            var signValues = {r: [Nat8] = []; s: [Nat8] = []; v: Nat64 = 0};
+                            switch(ETHCrypto.convertSignature(signature, msgRaw, hash, tx.from, ck_chainId, ecContext)){
+                                case(#ok(rsv)){ signValues := rsv };
+                                case(#err(e)){ throw Error.reject(e); };
+                            };
+                            let signedValues: ETHUtils.Signature = {r = signValues.r; s = signValues.s; v = signValues.v; from = ABI.fromHex(tx.from); hash = hash };
+                            let txObjNew: Transaction = ETHCrypto.buildSignedTransaction(txn, ?signedValues);
+                            // 0x2(EIP1559) || RLP([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, signatureYParity, signatureR, signatureS])
+                            let signedTx = ETHCrypto.rlpEncode(txObjNew);
+                            let signedHash = ETHCrypto.sha3(signedTx);
+                            _updateTx(_txi, {
+                                fee = null;
+                                amount = null;
+                                nonce = null;
+                                toids = null;
+                                txHash = ?ABI.toHex(signedHash);
+                                tx = ?txObjNew;
+                                rawTx = null;
+                                signedTx = ?(signedTx, signedHash);
+                                receipt = null;
+                                rpcRequestId = null;
+                                kytRequestId = null;
+                                status = ?#Sending;
+                                ts = ?_now();
+                            }, null);
+                            _putTxAccount(tx.tokenId, ABI.toHex(signedHash), userAddress, tx.account);
+                            return {txi = _txi; signature = signature; rawTx = signedTx; txHash = ABI.toHex(signedHash)};
                         };
                         case(_, _){
                             throw Error.reject("402: There is no tx or tx hash!");
@@ -556,11 +520,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _local_sendTx(_txi: TxIndex) : async* {txi: Nat; result: Result.Result<TxHash, Text>; rpcId: RpcRequestId}{
-        //let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
                 if (tx.status == #Sending){
-                    let accountId = _accountId(tx.account.owner, tx.account.subaccount);
                     switch(tx.signedTx){
                         case(?(raw, hash)){
                             switch(await* _sendRawTx(raw)){
@@ -583,7 +545,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                     return {txi = _txi; result = #ok(txid); rpcId = requestId};
                                 };
                                 case((requestId, #err(e))){
-                                    if (Text.contains(e, #text "no consensus was reached") or Text.contains(e, #text "already known")){
+                                    if (_isNormalRpcReturn(e)){
                                         _updateTx(_txi, {
                                             fee = null;
                                             amount = null;
@@ -632,30 +594,92 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             case(_){ throw Error.reject("402: The transaction record does not exist!"); };
         };
     };
+    private func _local_syncTx(_txi: TxIndex, _rapidly: Bool) : async* {txi: Nat; completed: Bool; status: Minter.Status}{
+        switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
+            case(?(tx, ts, cts)){
+                if (tx.status == #Confirmed){
+                    return {txi = _txi; completed = true; status = tx.status}; // #ok
+                }else if (tx.status == #Failure){
+                    throw Error.reject("406: Failure. "# debug_show({txi = _txi; completed = true; status = tx.status}));
+                }else if (not(_rapidly) and _now() < ts + ckNetworkBlockSlot * minConfirmations){
+                    throw Error.reject("407.1: Waiting. "# debug_show({txi = _txi; completed = false; status = tx.status}));
+                }else{
+                    let (completed, confirming, status) = await* _txCompletedAndCallback(_txi);
+                    if (completed and status == #Confirmed){
+                        return {txi = _txi; completed = completed; status = status}; // #ok
+                    }else if (completed and status == #Failure){
+                        throw Error.reject("406: Failure. "# debug_show({txi = _txi; completed = completed; status = status}));
+                    }else{
+                        throw Error.reject("407.2: Pending. "# debug_show({txi = _txi; completed = completed; status = status}));
+                    };
+                };
+            };
+            case(_){ throw Error.reject("404: The transaction record does not exist!"); };
+        };
+    };
+    private func _local_validateTx(_txHash: TxHash) : async* {txHash: TxHash; completed: Bool; status: Minter.Status; message: ?Text; token: ?Text; amount: ?Nat}{
+        switch(await* _syncMethod2TxnStatus(_txHash)){
+            case(#Confirmed, message, token, amount){
+                return {txHash = _txHash; completed = true; status = #Confirmed; message = message; token = token; amount = amount}; // #ok
+            };
+            case(#Failure, message, token, amount){
+                let res = {txHash = _txHash; completed = true; status = #Failure; message = message; token = token; amount = amount}; // Failure
+                throw Error.reject("410: Failure. "# Option.get(message, ""));
+            };
+            case(#Pending, message, token, amount){
+                throw Error.reject("408: Pending. "# Option.get(message, ""));
+            };
+            case(_, message, token, amount){
+                throw Error.reject("409: Unkown error. "# Option.get(message, ""));
+            };
+        };
+    };
     
     // Local task entrance
-    private func _local(_args: SagaTM.CallType, _receipt: ?SagaTM.Receipt) : async (SagaTM.TaskResult){
+    private func _customCall(_callee: Principal, _cycles: Nat, _args: SagaTM.CallType<CustomCallType>, _receipt: ?SagaTM.Receipt) : async (SagaTM.TaskResult){
         switch(_args){
-            case(#This(method)){
+            case(#custom(method)){
                 switch(method){
                     case(#getNonce(_txi, _toids)){
                         let result = await* _local_getNonce(_txi, _toids);
-                        return (#Done, ?#This(#getNonce(result)), null);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(result.txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     case(#createTx(_txi)){
                         let result = await* _local_createTx(_txi);
-                        return (#Done, ?#This(#createTx(result)), null);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(result.txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };case(#createTx_comp(_txi)){
                         let result = await* _local_createTx_comp(_txi);
-                        return (#Done, ?#This(#createTx_comp(result)), null);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(_txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     case(#signTx(_txi)){
                         let result = await* _local_signTx(_txi);
-                        return (#Done, ?#This(#signTx(result)), null);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(result.txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     case(#sendTx(_txi)){
                         let result = await* _local_sendTx(_txi);
-                        return (#Done, ?#This(#sendTx(result)), null);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(result.txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
+                    };
+                    case(#syncTx(_txi, _rapidly)){
+                        let result = await* _local_syncTx(_txi, _rapidly);
+                        // txi(32bytes)
+                        let resultRaw = ABI.natABIEncode(result.txi);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
+                    };
+                    case(#validateTx(_txHash)){
+                        let result = await* _local_validateTx(_txHash);
+                        // txHash(32bytes)
+                        let resultRaw = Option.get(ABI.fromHex(result.txHash), []);
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     //case(_){return (#Error, null, ?{code=#future(9901); message="Non-local function."; });};
                 };
@@ -672,12 +696,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     //     //orderLogs := Tools.arrayAppend(orderLogs, [(_toid, _status)]);
     // };
     // Create saga object
-    private var saga: ?SagaTM.SagaTM = null;
-    private func _getSaga() : SagaTM.SagaTM {
+    private var saga: ?SagaTM.SagaTM<CustomCallType> = null;
+    private func _getSaga() : SagaTM.SagaTM<CustomCallType> {
         switch(saga){
             case(?(_saga)){ return _saga };
             case(_){
-                let _saga = SagaTM.SagaTM(Principal.fromActor(this), ?_local, null, null); //?_taskCallback, ?_orderCallback
+                let _saga = SagaTM.SagaTM<CustomCallType>(Principal.fromActor(this), ?_customCall, null, null); //?_taskCallback, ?_orderCallback
                 saga := ?_saga;
                 return _saga;
             };
@@ -690,7 +714,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             if (_toid == 0){
                 try{
                     // countAsyncMessage += 1;
-                    let sagaRes = await* saga.getActuator().run();
+                    let _sagaRes = await* saga.getActuator().run();
                     // countAsyncMessage -= Nat.min(1, countAsyncMessage);
                 }catch(e){
                     // countAsyncMessage -= Nat.min(1, countAsyncMessage);
@@ -699,7 +723,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             }else{
                 try{
                     // countAsyncMessage += 2;
-                    let sagaRes = await saga.run(_toid);
+                    let _sagaRes = await saga.run(_toid);
                     // countAsyncMessage -= Nat.min(2, countAsyncMessage);
                 }catch(e){
                     // countAsyncMessage -= Nat.min(2, countAsyncMessage);
@@ -708,13 +732,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
-    private func _buildTask(_data: ?Blob, _callee: Principal, _callType: SagaTM.CallType, _preTtid: [SagaTM.Ttid], _cycles: Nat) : SagaTM.PushTaskRequest{
+    private func _buildTask(_data: ?Blob, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtid: [SagaTM.Ttid], _cycles: Nat, _attempts: ?Nat, _interval: ?Int) : SagaTM.PushTaskRequest<CustomCallType>{
         return {
             callee = _callee;
             callType = _callType;
             preTtid = _preTtid;
-            attemptsMax = ?3;
-            recallInterval = ?200000000; // nanoseconds
+            attemptsMax = _attempts;
+            recallInterval = _interval; // nanoseconds
             cycles = _cycles;
             data = _data;
         };
@@ -745,7 +769,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var completed: Bool = true;
         for (toid in _toids.vals()){
             let status = _getSaga().status(toid);
-            if (status != ?#Done and status != ?#Recovered){
+            if (status != ?#Done and status != ?#Recovered and status != null){
                 completed := false;
             };
         };
@@ -781,28 +805,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private func _setEthAccount(_a: AccountId, _ethaccount: EthAddress, _nonce: Nonce) : (){
         accounts := Trie.put(accounts, keyb(_a), Blob.equal, (_ethaccount, _nonce)).0;
     };
-    // private func _addEthNonce(_a: AccountId): (){
-    //     switch(Trie.get(accounts, keyb(_a), Blob.equal)){
-    //         case(?(account, nonce)){ 
-    //             accounts := Trie.put(accounts, keyb(_a), Blob.equal, (account, nonce + 1)).0; 
-    //         };
-    //         case(_){};
-    //     };
-    // };
-    // private func _setEthNonce(_a: AccountId, _nonce: Nonce): (){
-    //     switch(Trie.get(accounts, keyb(_a), Blob.equal)){
-    //         case(?(account, nonce)){ 
-    //             accounts := Trie.put(accounts, keyb(_a), Blob.equal, (account, _nonce)).0; 
-    //         };
-    //         case(_){};
-    //     };
-    // };
-    // private func _getEthNonce(_a: AccountId): Nonce{
-    //     switch(Trie.get(accounts, keyb(_a), Blob.equal)){
-    //         case(?(account, nonce)){ return nonce; };
-    //         case(_){ return 0; };
-    //     };
-    // };
     private func _getRpcUrl(_offset: Nat) : (keeper: AccountId, url: Text, total:Nat){
         let rpcs = Array.filter(Iter.toArray(Trie.iter<AccountId, RpcProvider>(ck_rpcProviders)), func (t: (AccountId, RpcProvider)): Bool{
             t.1.status == #Available;
@@ -1009,7 +1011,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         pendingDepositTxns := Trie.put(pendingDepositTxns, keyb(txHash), Blob.equal, (_txHash, _account, _signature, false, _now())).0;
     };
-    private func _verifyPendingDepositTxn(_txHash: TxHash) : (){
+    private func _validatePendingDepositTxn(_txHash: TxHash) : (){
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         switch(Trie.get(pendingDepositTxns, keyb(txHash), Blob.equal)){
             case(?(pending)){
@@ -1070,22 +1072,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         return Trie.get(depositTxns, keyb(txHash), Blob.equal);
     };
-    // private func _isExistedTxn(_txHash: TxHash) : Bool{
-    //     let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
-    //     return Option.isSome(Trie.get(depositTxns, keyb(txHash), Blob.equal)) or 
-    //     Option.isSome(Trie.get(pendingDepositTxns, keyb(txHash), Blob.equal));
-    // };
     private func _isPendingTxn(_txHash: TxHash) : Bool{
-        // if (not(_isExistedTxn(_txHash))){
-        //     return false;
-        // }; // in depositTxns or pendingDepositTxns
-        // let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
-        // var status: Status = #Pending;
-        // switch(Trie.get(depositTxns, keyb(txHash), Blob.equal)){
-        //     case(?(item, ts)){ status := item.status };
-        //     case(_){};
-        // };
-        // return status == #Pending; // or status == #Unknown; //status != #Confirmed and status != #Failure;
         let txHash = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         switch(Trie.get(depositTxns, keyb(txHash), Blob.equal)){
             case(?(item, ts)){ return item.status == #Pending; };
@@ -1106,20 +1093,19 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let tokenInfo = _getCkTokenInfo(_tokenId);
         return tokenInfo.fee.gasLimit;
     };
-    private func _getEthGas(_tokenId: EthAddress) : { gasPrice: Wei; gasLimit: Nat; maxFee: Wei;}{
-        let tokenInfo = _getCkTokenInfo(_tokenId);
+    private func _getEthGas(_tokenId: EthAddress) : EthGas{
         let gasLimit = _getGasLimit(_tokenId);
         var maxFee = gasLimit * (ck_gasPrice/* + PRIORITY_FEE_PER_GAS*/);
         return { gasPrice = ck_gasPrice/* + PRIORITY_FEE_PER_GAS*/; gasLimit = gasLimit; maxFee = maxFee; };
     };
-    private func _getFixedFee(_tokenId: EthAddress): {eth: Wei; token: Wei}{
+    private func _getFixedFee(_tokenId: EthAddress): CkFee{
         let tokenInfo = _getCkTokenInfo(_tokenId);
         return {
             eth = tokenInfo.fee.fixedFee;
             token = tokenInfo.fee.fixedFee * tokenInfo.fee.ethRatio / gwei_;
         };
     };
-    private func _getCkFee(_tokenId: EthAddress): {eth: Wei; token: Wei}{
+    private func _getCkFee(_tokenId: EthAddress): CkFee{
         let tokenInfo = _getCkTokenInfo(_tokenId);
         let gas = _getEthGas(_tokenId); // ETH
         return {
@@ -1127,7 +1113,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             token = (gas.maxFee + tokenInfo.fee.fixedFee) * tokenInfo.fee.ethRatio / gwei_;
         };
     };
-    private func _getCkFeeForDepositing(_tokenId: EthAddress): {eth: Wei; token: Wei}{
+    private func _getCkFeeForDepositing(_tokenId: EthAddress): CkFee{
         let tokenInfo = _getCkTokenInfo(_tokenId);
         let isERC20 = _tokenId != eth_;
         let gas = _getEthGas(_tokenId);
@@ -1140,7 +1126,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             token = (networkFee + gas.maxFee + tokenInfo.fee.fixedFee) * tokenInfo.fee.ethRatio / gwei_;
         };
     };
-    private func _getCkFeeForDepositing2(_tokenId: EthAddress, _ethGas: { gasPrice: Wei; gasLimit: Nat; maxFee: Wei;}): {eth: Wei; token: Wei}{
+    private func _getCkFeeForDepositing2(_tokenId: EthAddress, _ethGas: EthGas): CkFee{
         let ethInfo = _getCkTokenInfo(eth_);
         let tokenInfo = _getCkTokenInfo(_tokenId);
         let isERC20 = _tokenId != eth_;
@@ -1316,7 +1302,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             case(?(dexPair)){
                                 try{
                                     let icrc1: ICRC1.Self = actor(Principal.toText(token.ckLedgerId));
-                                    let pair: ICDex.Self = actor(Principal.toText(dexPair));
+                                    // let pair: ICDex.Self = actor(Principal.toText(dexPair));
                                     let ckTokenFee = await icrc1.icrc1_fee();
                                     if (balance > ckTokenFee*10){
                                         let amount = Nat.sub(balance, ckTokenFee);
@@ -1399,9 +1385,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _newTx(_type: {#Deposit; #DepositGas; #Withdraw}, _account: Account, _tokenId: EthAddress, _from: EthAddress, _to: EthAddress, _amount: Wei, _fee: { gasPrice: Wei; gasLimit: Nat; maxFee: Wei;}) : TxIndex{
-        let accountId = _accountId(_account.owner, _account.subaccount);
-        let isERC20 = _tokenId != eth_;
-        // let fee = _getEthGas(_tokenId);
         let txStatus: Minter.TxStatus = {
             txType = _type;
             tokenId = _tokenId;
@@ -1454,7 +1437,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     kytRequestId = switch(_update.kytRequestId){case(?(kytRequestId)){ ?kytRequestId }; case(_){ tx.kytRequestId } };
                     status = Option.get(_update.status, tx.status);
                 };
+                // ts: The time at which txn is broadcast. If the txn is not confirmed/failed within the expected time, the ts will be updated to a new time.
                 let txTs: Timestamp = Option.get(_update.ts, ts);
+                // coveredTs: The time recorded when a txn is replaced.
                 let txCoverTs: ?Timestamp = if (Option.isSome(_coveredTime)){ _coveredTime }else{ cts };
                 transactions := Trie.put(transactions, keyn(_txIndex), Nat.equal, (txStatus, txTs, txCoverTs)).0;
             };
@@ -1478,9 +1463,59 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             ts = null;
         }, null);
     };
-    private func _coverTx(_txi: TxIndex, _resetNonce: Bool, _refetchGasPrice: ?Bool, _amountSub: Wei, _autoAdjustAmount: Bool) : async* ?BlockHeight{
+    private func _ictcCoverTx(_txi: TxIndex, _resetNonce: Bool, _amount: Nat, _networkFee: EthGas, _originalTx: Minter.TxStatus, _feeDiffEth: Nat) : (TxIndex, SagaTM.Toid){
+        let tx = _originalTx;
+        let feeDiffEth = _feeDiffEth;
+        let accountId = _accountId(tx.account.owner, tx.account.subaccount);
+        let isERC20 = tx.tokenId != eth_;
+        let networkFee = _networkFee; // for ETH 
+        var preTids: [Nat] = [];
+        let saga = _getSaga();
+        if (feeDiffEth > 0 and tx.txType == #Deposit and isERC20){
+            let (userAddress, userNonce) = _getEthAddressQuery(accountId);
+            let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
+            let txi0 = _newTx(#DepositGas, tx.account, eth_, mainAddress, userAddress, feeDiffEth, networkFee);
+            let txi0Blob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi0))); 
+            let toid0 : Nat = saga.create("deposit_gas_for_covering", #Forward, ?txi0Blob, null);
+            let task0_1 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#getNonce(txi0, ?[toid0])), [], 0, null, null);
+            let _ttid0_1 = saga.push(toid0, task0_1, null, null);
+            let task0_2 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#createTx(txi0)), [], 0, null, null);
+            let _ttid0_2 = saga.push(toid0, task0_2, null, null);
+            let task0_3 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#signTx(txi0)), [], 0, null, null);
+            let _ttid0_3 = saga.push(toid0, task0_3, null, null);
+            let task0_4 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#sendTx(txi0)), [], 0, null, null);
+            let _ttid0_4 = saga.push(toid0, task0_4, null, null);
+            let task0_5 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#syncTx(txi0, true)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+            let ttid0_5 = saga.push(toid0, task0_5, null, null);
+            preTids := [ttid0_5];
+            saga.close(toid0);
+            _updateTxToids(txi0, [toid0]);
+            ignore _putEvent(#depositGas({txIndex = txi0; toid = toid0; account = tx.account; address = userAddress; amount = feeDiffEth}), ?accountId);
+        };
+        let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
+        let toid : Nat = saga.create("cover_transaction", #Forward, ?txiBlob, null);
+        if (_resetNonce){
+            let task0 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#getNonce(_txi, ?[toid])), preTids, 0, null, null);
+            let _ttid0 = saga.push(toid, task0, null, null);
+            let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(_txi)), [], 0, null, null);
+            let _ttid1 = saga.push(toid, task1, null, null);
+        }else{
+            let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(_txi)), preTids, 0, null, null);
+            let _ttid1 = saga.push(toid, task1, null, null);
+        };
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(_txi)), [], 0, null, null);
+        let _ttid2 = saga.push(toid, task2, null, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(_txi)), [], 0, null, null);
+        let _ttid3 = saga.push(toid, task3, null, null);
+        let task_4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(_txi, false)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let _ttid_4 = saga.push(toid, task_4, null, null);
+        saga.close(toid);
+        // _updateTxToids(_txi, [toid]);
+        return (_txi, toid);
+    };
+    private func _coverTx(_txi: TxIndex, _resetNonce: Bool, _refetchGasPrice: ?Bool, _amountSub: Wei, _autoAdjustAmount: Bool, _doneAllTO: Bool) : async* ?BlockHeight{
         if (Option.get(_refetchGasPrice, false) or _now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
-            let gasPrice = await* _fetchGasPrice();
+            ignore await* _fetchGasPrice();
         };
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
@@ -1493,15 +1528,18 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     if (Option.isNull(tx.nonce) and not(_resetNonce)){
                         throw Error.reject("402: Nonce is empty!");
                     };
+                    // check ICTC in progress
                     for (toid in tx.toids.vals()){
-                        if (_onlyBlocking(toid)){
-                            let r = await* _getSaga().complete(toid, #Recovered);
-                            //let r = await* _getSaga().done(toid, #Recovered, true);
+                        if (_onlyBlocking(toid) and _doneAllTO){
+                            let _r = await* _getSaga().done(toid, #Recovered, true);
+                        }else if (_onlyBlocking(toid)){
+                            let _r = await* _getSaga().complete(toid, #Recovered);
                         };
                     };
                     if (not(_ictcDone(tx.toids))){
                         throw Error.reject("402: ICTC has orders in progress!");
                     };
+                    // Adjust amount
                     var feeDiffEth: Nat = 0;
                     var feeDiff: Nat = 0;
                     if (_autoAdjustAmount and feeNew.maxFee > tx.fee.maxFee){
@@ -1527,44 +1565,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             ignore _subFeeBalance(eth_, Nat.min(mainFeeBalance, feeDiffEth));
                             ignore _burnCkToken(eth_, Blob.fromArray(sa_one), feeDiffEth, feeAccount);
                         };
-                        // ICTC
-                        var preTids: [Nat] = [];
-                        let saga = _getSaga();
-                        if (feeDiffEth > 0 and tx.txType == #Deposit and isERC20){
-                            let (userAddress, userNonce) = _getEthAddressQuery(accountId);
-                            let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
-                            let txi0 = _newTx(#DepositGas, tx.account, eth_, mainAddress, userAddress, feeDiffEth, networkFee);
-                            let txi0Blob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi0))); 
-                            let toid0 : Nat = saga.create("deposit_gas_for_covering", #Forward, ?accountId, null);
-                            let task0_1 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#getNonce(txi0, ?[toid0])), [], 0);
-                            let ttid0_1 = saga.push(toid0, task0_1, null, null);
-                            let task0_2 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#createTx(txi0)), [], 0);
-                            let ttid0_2 = saga.push(toid0, task0_2, null, null);
-                            let task0_3 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#signTx(txi0)), [], 0);
-                            let ttid0_3 = saga.push(toid0, task0_3, null, null);
-                            let task0_4 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#sendTx(txi0)), [], 0);
-                            let ttid0_4 = saga.push(toid0, task0_4, null, null);
-                            preTids := [ttid0_4];
-                            saga.close(toid0);
-                            _updateTxToids(txi0, [toid0]);
-                            ignore _putEvent(#depositGas({txIndex = txi0; toid = toid0; account = tx.account; address = userAddress; amount = feeDiffEth}), ?accountId);
-                        };
-                        let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
-                        let toid : Nat = saga.create("cover_tx", #Forward, ?accountId, null);
-                        if (_resetNonce){
-                            let task0 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(_txi, ?[toid])), preTids, 0);
-                            let ttid0 = saga.push(toid, task0, null, null);
-                            let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(_txi)), [], 0);
-                            let ttid1 = saga.push(toid, task1, null, null);
-                        }else{
-                            let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(_txi)), preTids, 0);
-                            let ttid1 = saga.push(toid, task1, null, null);
-                        };
-                        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(_txi)), [], 0);
-                        let ttid2 = saga.push(toid, task2, null, null);
-                        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(_txi)), [], 0);
-                        let ttid3 = saga.push(toid, task3, null, null);
-                        saga.close(toid);
+                        let (txi, toid) = _ictcCoverTx(_txi, _resetNonce, amountNew, networkFee, tx, feeDiffEth);
                         let args: Minter.UpdateTxArgs = {
                             fee = ?feeNew;
                             amount = ?amountNew;
@@ -1633,27 +1634,26 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             key_id = { curve = #secp256k1; name = KEY_NAME }; //dfx_test_key
         });
         own_public_key := Blob.toArray(ecdsa_public_key.public_key);
-        switch(await utils.pub_to_address(own_public_key)){
-            case(#Ok(account)){
-                own_account := account;
-                own_address := ABI.toHex(account);
+        switch(ETHCrypto.pubToAddress(own_public_key)){
+            case(#ok(address)){
+                own_address := address;
+                own_account := Option.get(ABI.fromHex(own_address), []);
             };
-            case(#Err(e)){
+            case(#err(e)){
                 throw Error.reject("401: Error while getting address!");
             };
         };
         return (own_public_key, own_account, own_address);
     };
-    private func _sign(_dpath: DerivationPath, _messageHash : Blob) : async* Blob {
-        Cycles.add(ECDSA_SIGN_CYCLES);
-        let res = await ic.sign_with_ecdsa({
-            message_hash = _messageHash;
-            derivation_path = _dpath;
-            key_id = { curve = #secp256k1; name = KEY_NAME; };
-        });
-        res.signature
+    private func _sign(_dpath: DerivationPath, _messageHash : [Nat8]) : async* [Nat8] {
+        return await* ETHCrypto.signMsg(_dpath, _messageHash, ECDSA_SIGN_CYCLES, KEY_NAME);
     };
 
+
+    private func _isNormalRpcReturn(_msg: Text) : Bool{
+        return Text.contains(_msg, #text "no consensus was reached") or Text.contains(_msg, #text "No consensus could be reached") 
+        or Text.contains(_msg, #text "already known") or Text.contains(_msg, #text "ALREADY_EXISTS");
+    };
     public query func rpc_call_transform(raw : IC.TransformArgs) : async IC.HttpResponsePayload {
         return RpcCaller.transform(raw);
     };
@@ -1662,8 +1662,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let input = "{\"jsonrpc\":\"2.0\",\"method\":\""# _methodName #"\",\"params\": "# _params #",\"id\":"# Nat.toText(id) #"}";
         rpcId += 1;
         ck_rpcLogs := RpcRequest.preRpcLog(ck_rpcLogs, id, _rpcUrl, input);
-        Cycles.add(RPC_AGENT_CYCLES);
-        // let res = await rpc.json_rpc(input, _responseSize, #url_with_api_key(_rpcUrl));
+        Cycles.add<system>(RPC_AGENT_CYCLES);
         try{
             let res = await* RpcCaller.call(_rpcUrl, input, _responseSize, RPC_AGENT_CYCLES, ?{function = rpc_call_transform; context = Blob.fromArray([])});
             return (id, #Ok(res.2));
@@ -1759,8 +1758,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var isConfirmed : Bool = false;
         var i : Nat = 0;
         var requestStatus: RpcRequestStatus = #pending;
-        while(not(isConfirmed) and i < size){
-            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.treeSegIndex(i, size));
+        while(not(isConfirmed) and i < size + 2){
+            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.threeSegIndex(i, size));
             i += 1;
             let log = await* _request(keeper, rpcUrl, requestId);
             let (data1, data2, status_) = RpcRequest.putRpcRequestLog(ck_rpcRequests, ck_rpcRequestConsensusTemps, requestId, log, minConfirmationNum);
@@ -1771,12 +1770,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 case(#ok(v)){ isConfirmed := true };
                 case(_){};
             };
-            // switch(log.status){
-            //     case(#ok(v)){
-            //         return v;
-            //     };
-            //     case(_){throw Error.reject("pending");};
-            // };
         };
         switch(requestStatus){
             case(#ok(v)){
@@ -1805,10 +1798,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     private func _fetchChainId() : async* Nat {
-        let (keeper, rpcUrl, size) = _getRpcUrl(0);
-        let minRpcRequests : Nat = size;
         let params = "[]";
-        ck_chainId := await* _fetchNumber("eth_chainId", params, 1000, minRpcRequests, "result");
+        ck_chainId := await* _fetchNumber("eth_chainId", params, 1000, minRpcConfirmations, "result");
         return ck_chainId;
     };
     // The reason minRpcRequests is set to 2 is that getting the wrong gasPrice does not cause fund to be lost.
@@ -1827,14 +1818,16 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var confirmations: Nat = 0;
         var i: Nat = 0;
         while (confirmations < minRpcRequests and i < minRpcRequests * 2){
-            let v = await* _fetchNumber("eth_blockNumber", params, 1000, 1, "result");
-            if (value == 0){
-                value := v;
-                confirmations += 1;
-            }else if (v >= Nat.sub(value, 1) and v <= value + 2){
-                value := Nat.max(value, v);
-                confirmations += 1;
-            };
+            try{
+                let v = await* _fetchNumber("eth_blockNumber", params, 1000, 1, "result");
+                if (value == 0){
+                    value := v;
+                    confirmations += 1;
+                }else if (v >= Nat.sub(value, 1) and v <= value + 3){
+                    value := Nat.max(value, v);
+                    confirmations += 1;
+                };
+            }catch(e){};
             i += 1;
         };
         if (value >= ck_ethBlockNumber.0 and confirmations >= minRpcRequests){
@@ -1929,7 +1922,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
             }catch(e){
                 error := Error.message(e);
-                if (Text.contains(error, #text "no consensus was reached") or Text.contains(error, #text "already known")){ 
+                if (_isNormalRpcReturn(error)){ 
                     ck_rpcProviders := RpcRequest.updateRpcProviderStats(ck_rpcProviders, healthinessIntervalSeconds, keeper, true);
                     values := [#Text(error)];
                     status := #ok(values);
@@ -1956,8 +1949,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var isConfirmed : Bool = false;
         var i : Nat = 0;
         var requestStatus: RpcRequestStatus = #pending;
-        while(not(isConfirmed) and i < size){
-            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.treeSegIndex(i, size));
+        while(not(isConfirmed) and i < size + 2){
+            let (keeper, rpcUrl, size_) = _getRpcUrl(offset + RpcRequest.threeSegIndex(i, size));
             i += 1;
             let log = await* _request(keeper, rpcUrl, requestId);
             let (data1, data2, status_) = RpcRequest.putRpcRequestLog(ck_rpcRequests, ck_rpcRequestConsensusTemps, requestId, log, minRpcRequests);
@@ -2098,8 +2091,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             memo = null;
             created_at_time = null; // nanos
         };
-        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#send({toid = ?toid; to = to; icTokenCanisterId = ckTokenCanisterId; amount = amount}), ?toAccountId);
         return toid;
@@ -2126,7 +2119,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
         let (userAddress, userNonce) = _getEthAddressQuery(accountId);
         let saga = _getSaga();
-        let toid : Nat = saga.create("mint", #Forward, ?accountId, null);
+        let toid : Nat = saga.create("mint_ck_token", #Forward, ?txiBlob, null);
         let args : ICRC1.TransferArgs = {
             from_subaccount = null;
             to = icrc1Account;
@@ -2135,8 +2128,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             memo = switch(ABI.fromHex(userAddress)){ case(?memo){ ?Blob.fromArray(memo) }; case(_){ null }; };
             created_at_time = null; // nanos
         };
-        let task = _buildTask(?txiBlob, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(?txiBlob, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#mint({toid = toid; account = account; icTokenCanisterId = ckTokenCanisterId; amount = amount}), ?accountId);
         return toid;
@@ -2147,7 +2140,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let accountId = _accountId(account.owner, account.subaccount);
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
         let saga = _getSaga();
-        let toid : Nat = saga.create("burn", #Forward, ?accountId, null);
+        let toid : Nat = saga.create("burn_ck_token", #Forward, ?accountId, null);
         let burnArgs : ICRC1.TransferArgs = {
             from_subaccount = ?fromSubaccount;
             to = mainIcrc1Account;
@@ -2156,8 +2149,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             memo = null;
             created_at_time = null; // nanos
         };
-        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(burnArgs)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(burnArgs)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#burn({toid = ?toid; account = account; address = ""; icTokenCanisterId = ckTokenCanisterId; tokenBlockIndex = 0; amount = amount}), ?accountId);
         return toid;
@@ -2197,14 +2190,84 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             await* _ictcSagaRun(toid, false);
         };
     };
-    private func _syncTxStatus(_txIndex: TxIndex, _immediately: Bool) : async* (){
+    private func _txCallback(_txIndex: TxIndex) : [SagaTM.Toid]{
+        var toids: [SagaTM.Toid] = [];
         switch(Trie.get(transactions, keyn(_txIndex), Nat.equal)){
             case(?(tx, ts, cts)){
                 let accountId = _accountId(tx.account.owner, tx.account.subaccount);
-                if ((tx.status == #Sending or tx.status == #Submitted or tx.status == #Pending)
-                and (_immediately or (_now() > ts + 90  and _ictcDone(tx.toids)) )){
+                if (tx.status == #Confirmed){
+                    if (tx.txType == #Deposit){ // _isPending()
+                        let isERC20 = tx.tokenId != eth_;
+                        let gasFee = tx.fee; //_getEthGas(tx.tokenId); // eth Wei // Getting the fee from the tx record
+                        let ckFee = _getCkFeeForDepositing2(tx.tokenId, tx.fee); // {eth; token} Wei // Getting the fee from the tx record
+                        var amount: Wei = tx.amount;
+                        // Mint fee
+                        var fee: Wei = 0;
+                        if (isERC20){
+                            fee := ckFee.token;
+                            amount -= Nat.min(amount, fee);
+                            ignore _addFeeBalance(tx.tokenId, fee);
+                            let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+                            let toid = _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
+                            toids := Tools.arrayAppend(toids, [toid]);
+                        }else{
+                            fee := Nat.sub(ckFee.eth, gasFee.maxFee);
+                            amount -= Nat.min(amount, fee);
+                            ignore _addFeeBalance(tx.tokenId, fee);
+                            let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+                            let toid = _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
+                            toids := Tools.arrayAppend(toids, [toid]);
+                        };
+                        ignore _addBalance(tx.account, tx.tokenId, amount);
+                        ignore _removeDepositingTxIndex(accountId, _txIndex);
+                        ignore _putEvent(#depositResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=amount; fee = ?fee})), ?accountId);
+                        _stats(tx.tokenId, #Minting, amount);
+                        // Mint
+                        let depositingBalance = Nat.min(amount, _getBalance(tx.account, tx.tokenId));
+                        if (depositingBalance > 0){
+                            ignore _subBalance(tx.account, tx.tokenId, depositingBalance);
+                            ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tx.tokenId, depositingBalance);
+                            // mint ckToken
+                            let toid = _mintCkToken(tx.tokenId, tx.account, depositingBalance, ?_txIndex);
+                            toids := Tools.arrayAppend(toids, [toid]);
+                        };
+                    }else if(tx.txType == #DepositGas){ // _isPending()
+                        ignore _putEvent(#depositGasResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=tx.amount})), ?accountId);
+                    }else if(tx.txType == #Withdraw){ // _isPending()
+                        _removeRetrievingTxIndex(_txIndex);
+                        ignore _putEvent(#withdrawResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=tx.amount})), ?accountId);
+                        _stats(tx.tokenId, #Retrieval, tx.amount);
+                    };
+                }else if (tx.status == #Failure){
+                    if (tx.txType == #Deposit){
+                        ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
+                        ignore _putEvent(#depositResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
+                    }else if(tx.txType == #DepositGas){
+                        ignore _putEvent(#depositGasResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
+                    }else if(tx.txType == #Withdraw){
+                        _removeRetrievingTxIndex(_txIndex);
+                        ignore _putEvent(#withdrawResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
+                    };
+                };
+            };
+            case(_){};
+        };
+        return toids;
+    };
+    // The function is idempotent, allowing it to be called repeatedly.
+    private func _txCompletedAndCallback(_txIndex: TxIndex) : async* (completed: Bool, confirming: Bool, status: Minter.Status){
+        var completed: Bool = false;
+        var confirming: Bool = false;
+        var status: Minter.Status = #Pending;
+        switch(Trie.get(transactions, keyn(_txIndex), Nat.equal)){
+            case(?(tx, ts, cts)){
+                if (tx.status == #Sending or tx.status == #Submitted or tx.status == #Pending){
                     let txHashs = tx.txHash;
-                    var status = tx.status;
+                    status := tx.status;
+                    var minConfirms = minConfirmations;
+                    if (tx.txType == #DepositGas){
+                        minConfirms := 1;
+                    };
                     var countFailure : Nat = 0;
                     var receiptTemp: ?Text = null;
                     label TxReceipt for (txHash in txHashs.vals()){
@@ -2216,58 +2279,26 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             };
                             case(_){};
                         };
-                        if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirmations){
+                        if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirms){
+                            completed := true;
                             status := #Confirmed;
                             receiptTemp := res;
-                            if (tx.txType == #Deposit and _isPending(_txIndex)){ // _isPending()
-                                let isERC20 = tx.tokenId != eth_;
-                                let gasFee = tx.fee; //_getEthGas(tx.tokenId); // eth Wei // Getting the fee from the tx record
-                                let ckFee = _getCkFeeForDepositing2(tx.tokenId, tx.fee); // {eth; token} Wei // Getting the fee from the tx record
-                                var amount: Wei = tx.amount;
-                                var fee: Wei = 0;
-                                if (isERC20){
-                                    fee := ckFee.token;
-                                    amount -= Nat.min(amount, fee);
-                                    ignore _addFeeBalance(tx.tokenId, fee);
-                                    let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                                    ignore _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
-                                }else{
-                                    fee := Nat.sub(ckFee.eth, gasFee.maxFee);
-                                    amount -= Nat.min(amount, fee);
-                                    ignore _addFeeBalance(tx.tokenId, fee);
-                                    let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                                    ignore _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex);
-                                };
-                                ignore _addBalance(tx.account, tx.tokenId, amount);
-                                ignore _removeDepositingTxIndex(accountId, _txIndex);
-                                ignore _putEvent(#depositResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=amount; fee = ?fee})), ?accountId);
-                                _stats(tx.tokenId, #Minting, amount);
-                            }else if(tx.txType == #DepositGas and _isPending(_txIndex)){ // _isPending()
-                                ignore _putEvent(#depositGasResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=tx.amount})), ?accountId);
-                            }else if(tx.txType == #Withdraw and _isPending(_txIndex)){ // _isPending()
-                                _removeRetrievingTxIndex(_txIndex);
-                                ignore _putEvent(#withdrawResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=tx.amount})), ?accountId);
-                                _stats(tx.tokenId, #Retrieval, tx.amount);
-                            };
                             break TxReceipt;
-                        }else if (succeeded and (blockHeight == 0 or _getBlockNumber() < blockHeight + minConfirmations)){
+                        }else if (succeeded and (blockHeight == 0 or _getBlockNumber() < blockHeight + minConfirms)){
                             status := #Pending;
                             receiptTemp := res;
-                        }else if (not(succeeded) and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirmations){
+                            if (blockHeight > 0 and _getBlockNumber() < blockHeight + minConfirms){
+                                confirming := true;
+                            };
+                        }else if (not(succeeded) and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirms){
                             countFailure += 1;
+                        }else{ // not(succeeded) and blockHeight < blockHeight + minConfirms
+                            // unknowen
                         };
                     };
                     if (countFailure == txHashs.size() and _isPending(_txIndex)){ // _isPending()
+                        completed := true;
                         status := #Failure;
-                        if (tx.txType == #Deposit){
-                            ignore _removeDepositingTxIndex(_accountId(tx.account.owner, tx.account.subaccount), _txIndex);
-                            ignore _putEvent(#depositResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
-                        }else if(tx.txType == #DepositGas){
-                            ignore _putEvent(#depositGasResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
-                        }else if(tx.txType == #Withdraw){
-                            _removeRetrievingTxIndex(_txIndex);
-                            ignore _putEvent(#withdrawResult(#err({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=0})), ?accountId);
-                        };
                     };
                     if (status != tx.status and _isPending(_txIndex)){// _isPending()
                         _updateTx(_txIndex, {
@@ -2283,9 +2314,26 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             rpcRequestId = null;
                             kytRequestId = null;
                             status = ?status;
-                            ts = ?_now();
+                            ts = null;
                         }, null);
-                    }else if (_isPending(_txIndex)){// _isPending()
+                        // Callback
+                        let _toids = _txCallback(_txIndex);
+                        // if (toids.size() > 0){
+                        //     await* _ictcSagaRun(0, false);
+                        // };
+                    };
+                };
+            };
+            case(_){};
+        };
+        return (completed, confirming, status);
+    };
+    // Called proactively to update the txn status, or when it has been unconfirmed for too long.
+    private func _syncTxStatus(_txIndex: TxIndex, _immediately: Bool) : async* (){
+        switch(Trie.get(transactions, keyn(_txIndex), Nat.equal)){
+            case(?(tx, ts, cts)){
+                if ((tx.status == #Submitted or tx.status == #Pending) and (_immediately or (_now() > ts + ckNetworkBlockSlot * minConfirmations * 3 / 2) )){
+                    if (_now() > ts + ckNetworkBlockSlot * minConfirmations * 3 / 2){
                         _updateTx(_txIndex, {
                             fee = null;
                             amount = null;
@@ -2302,19 +2350,83 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             ts = ?_now();
                         }, null);
                     };
+                    if (tx.txType == #Deposit and tx.tokenId != eth_ and _txIndex > 0){
+                        ignore await* _txCompletedAndCallback(Nat.sub(_txIndex, 1)); // #DepositGas
+                    };
+                    ignore await* _txCompletedAndCallback(_txIndex);
+                    await* _ictcSagaRun(0, false);
                 };
             };
             case(_){};
         };
+    };
+    private func _syncTxs() : async* (){
+        for ((txi, (tx, ts, cts)) in Trie.iter(transactions)){
+            if (_now() > ts + ckNetworkBlockSlot * minConfirmations * 2){
+                await* _syncTxStatus(txi, false);
+            };
+        };
+    };
+    private func _ictcDepositTx(_account : Account, _tokenId: Text, _amount: Nat, _networkFee: EthGas, _gasFee: EthGas) : (TxIndex, SagaTM.Toid){
+        var preTids: [Nat] = [];
+        let saga = _getSaga();
+        let tokenId = _tokenId;
+        let amount = _amount;
+        let networkFee = _networkFee; // for ETH
+        let gasFee = _gasFee; // for ETH or ERC20
+        let depositFee = gasFee.maxFee;
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        let (userAddress, userNonce) = _getEthAddressQuery(accountId);
+        let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
+        let isERC20 = tokenId != eth_;
+        var txi0 = 0; // depositing gas txn
+        if (isERC20){
+            txi0 := _newTx(#DepositGas, _account, eth_, mainAddress, userAddress, gasFee.maxFee, networkFee);
+        };
+        let txi = _newTx(#Deposit, _account, tokenId, userAddress, mainAddress, amount, gasFee);
+        let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
+        _putDepositingTxIndex(accountId, txi);
+        _putAddressAccount(tokenId, userAddress, _account);
+        if (isERC20){
+            let txi0Blob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi0))); 
+            let toid0 : Nat = saga.create("deposit_gas", #Forward, ?txi0Blob, null);
+            let task0_1 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#getNonce(txi0, ?[toid0])), [], 0, null, null);
+            let _ttid0_1 = saga.push(toid0, task0_1, null, null);
+            let task0_2 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#createTx(txi0)), [], 0, null, null);
+            let _ttid0_2 = saga.push(toid0, task0_2, null, null);
+            let task0_3 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#signTx(txi0)), [], 0, null, null);
+            let _ttid0_3 = saga.push(toid0, task0_3, null, null);
+            let task0_4 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#sendTx(txi0)), [], 0, null, null);
+            let _ttid0_4 = saga.push(toid0, task0_4, null, null);
+            let task0_5 = _buildTask(?txi0Blob, Principal.fromActor(this), #custom(#syncTx(txi0, true)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+            let ttid0_5 = saga.push(toid0, task0_5, null, null);
+            preTids := [ttid0_5];
+            saga.close(toid0);
+            _updateTxToids(txi0, [toid0]);
+            ignore _putEvent(#depositGas({txIndex = txi0; toid = toid0; account = _account; address = userAddress; amount = gasFee.maxFee}), ?accountId);
+        };
+        let toid : Nat = saga.create("deposit_method1(evm->ic)", #Forward, ?txiBlob, null);
+        let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#getNonce(txi, ?[toid])), preTids, 0, null, null);
+        let _ttid1 = saga.push(toid, task1, null, null);
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(txi)), [], 0, null, null);
+        let _ttid2 = saga.push(toid, task2, null, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(txi)), [], 0, null, null);
+        let _ttid3 = saga.push(toid, task3, null, null);
+        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(txi)), [], 0, null, null);
+        let _ttid4 = saga.push(toid, task4, null, null);
+        let task5 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(txi, false)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let _ttid5 = saga.push(toid, task5, null, null);
+        saga.close(toid);
+        _updateTxToids(txi, [toid]);
+        ignore _putEvent(#deposit({txIndex = txi; toid = toid; account = _account; address = userAddress; token = tokenId; amount = amount; fee = ?depositFee}), ?accountId);
+        return (txi, toid);
     };
     private func _depositNotify(_token: ?EthAddress, _account : Account) : async* {
         #Ok : Minter.UpdateBalanceResult; 
         #Err : Minter.ResultError;
     }{
         let accountId = _accountId(_account.owner, _account.subaccount);
-        let account = _account;
         let (userAddress, userNonce) = _getEthAddressQuery(accountId);
-        let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
         if (Text.size(userAddress) != 42){
             return #Err(#GenericError({code = 402; message="402: Address is not available."}));
         };
@@ -2330,120 +2442,74 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         var depositFee: Wei = 0;
         if (Option.isSome(_getDepositingTxIndex(accountId))){
             let txi = Option.get(_getDepositingTxIndex(accountId),0);
-            if (isERC20 and txi > 0){
-                await* _syncTxStatus(Nat.sub(txi, 1), false); // Depost Gas
-            };
             await* _syncTxStatus(txi, false); // Deposit
             return #Err(#GenericError({code = 402; message="402: You have a deposit waiting for network confirmation."}));
         }else{ // New deposit
             depositAmount := await* _fetchBalance(tokenId, userAddress, true); // Wei  
-        };
-        if (depositAmount > ckFee.token and depositAmount > _getTokenMinAmount(tokenId) and Option.isNull(_getDepositingTxIndex(accountId))){ 
-            var amount = depositAmount;
-            if (isERC20){
-                if (_getFeeBalance(eth_) >= networkFee.maxFee + gasFee.maxFee){
-                    ignore _subFeeBalance(eth_, networkFee.maxFee + gasFee.maxFee);
-                    let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                    ignore _burnCkToken(eth_, Blob.fromArray(sa_one), networkFee.maxFee + gasFee.maxFee, feeAccount);
+            if (depositAmount > ckFee.token and depositAmount > _getTokenMinAmount(tokenId) and Option.isNull(_getDepositingTxIndex(accountId))){ 
+                var amount = depositAmount;
+                if (isERC20){
+                    if (_getFeeBalance(eth_) >= networkFee.maxFee + gasFee.maxFee){
+                        ignore _subFeeBalance(eth_, networkFee.maxFee + gasFee.maxFee);
+                        let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+                        ignore _burnCkToken(eth_, Blob.fromArray(sa_one), networkFee.maxFee + gasFee.maxFee, feeAccount);
+                    }else{
+                        return #Err(#GenericError({code = 402; message="402: Insufficient fee balance."}));
+                    };
                 }else{
-                    return #Err(#GenericError({code = 402; message="402: Insufficient fee balance."}));
+                    depositFee := gasFee.maxFee;
+                    amount -= Nat.min(amount, depositFee);
                 };
-            }else{
-                depositFee := gasFee.maxFee;
-                amount -= Nat.min(amount, depositFee);
+                //ICTC: 
+                let (txi, toid) = _ictcDepositTx(_account, tokenId, amount, networkFee, gasFee);
+                // await* _ictcSagaRun(toid, false);
+                let _f = _getSaga().run(toid);
+                return #Ok({ 
+                    blockIndex = Nat.sub(blockIndex, 1); 
+                    amount = amount;
+                    txIndex = txi;
+                    toid = toid;
+                });
+            }else {
+                return #Err(#GenericError({code = 402; message="402: No new deposit, or the transaction is pending, or the amount is less than the minimum value."}));
             };
-            var txi0 = 0; // depositing gas txn
-            if (isERC20){
-                txi0 := _newTx(#DepositGas, account, eth_, mainAddress, userAddress, gasFee.maxFee, networkFee);
-            };
-            let txi = _newTx(#Deposit, account, tokenId, userAddress, mainAddress, amount, gasFee);
-            _putDepositingTxIndex(accountId, txi);
-            _putAddressAccount(tokenId, userAddress, _account);
-            //ICTC: 
-            var preTids: [Nat] = [];
-            let saga = _getSaga();
-            if (isERC20){
-                let txi0Blob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi0))); 
-                let toid0 : Nat = saga.create("deposit_gas", #Forward, ?accountId, null);
-                let task0_1 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#getNonce(txi0, ?[toid0])), [], 0);
-                //let comp0_1 = _buildTask(?txi0Blob, Principal.fromActor(this), #__skip, [], 0);
-                let ttid0_1 = saga.push(toid0, task0_1, null, null);
-                let task0_2 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#createTx(txi0)), [], 0);
-                //let comp0_2 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#createTx_comp(txi0)), [], 0);
-                let ttid0_2 = saga.push(toid0, task0_2, null, null);
-                let task0_3 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#signTx(txi0)), [], 0);
-                //let comp0_3 = _buildTask(?txi0Blob, Principal.fromActor(this), #__block, [], 0);
-                let ttid0_3 = saga.push(toid0, task0_3, null, null);
-                let task0_4 = _buildTask(?txi0Blob, Principal.fromActor(this), #This(#sendTx(txi0)), [], 0);
-                //let comp0_4 = _buildTask(?txi0Blob, Principal.fromActor(this), #__skip, [], 0);
-                let ttid0_4 = saga.push(toid0, task0_4, null, null);
-                preTids := [ttid0_4];
-                saga.close(toid0);
-                _updateTxToids(txi0, [toid0]);
-                ignore _putEvent(#depositGas({txIndex = txi0; toid = toid0; account = _account; address = userAddress; amount = gasFee.maxFee}), ?accountId);
-            };
-            let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
-            let toid : Nat = saga.create("deposit", #Forward, ?accountId, null);
-            let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(txi, ?[toid])), preTids, 0);
-            //let comp1 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
-            let ttid1 = saga.push(toid, task1, null, null);
-            let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(txi)), [], 0);
-            //let comp2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx_comp(txi)), [], 0);
-            let ttid2 = saga.push(toid, task2, null, null);
-            let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
-            //let comp3 = _buildTask(?txiBlob, Principal.fromActor(this), #__block, [], 0);
-            let ttid3 = saga.push(toid, task3, null, null);
-            let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
-            //let comp4 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
-            let ttid4 = saga.push(toid, task4, null, null);
-            saga.close(toid);
-            _updateTxToids(txi, [toid]);
-            await* _ictcSagaRun(toid, false);
-            ignore _putEvent(#deposit({txIndex = txi; toid = toid; account = _account; address = userAddress; token = tokenId; amount = amount; fee = ?depositFee}), ?accountId);
-            return #Ok({ 
-                blockIndex = Nat.sub(blockIndex, 1); 
-                amount = amount;
-                txIndex = txi;
-                toid = toid;
-            });
-        }else {
-            return #Err(#GenericError({code = 402; message="402: No new deposit, or the transaction is pending, or the amount is less than the minimum value."}));
         };
     };
-    private var lastUpdateBalanceItemTime : Nat = 0;
-    private var lastUpdateBalanceTime : Nat = 0;
-    private func _updateBalance(): async* (){
-        if (_notPaused() and _now() >= lastUpdateBalanceTime + 60 and _now() > lastUpdateBalanceItemTime + 15){
-            lastUpdateBalanceTime := _now();
-            lastUpdateBalanceItemTime := _now();
-            for ((accountId, tokenBalances) in Trie.iter(balances)){
-                if (_notPaused() and accountId != _accountId(Principal.fromActor(this), null)){ // Non-pool account
-                    for((tokenIdBlob, (account, x)) in Trie.iter(tokenBalances)){
-                        let tokenId = ABI.toHex(Blob.toArray(tokenIdBlob));
-                        let isERC20 = tokenId != eth_;
-                        let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
-                        let (userAddress, userNonce) = _getEthAddressQuery(accountId);
-                        let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
-                        let txi = _getDepositingTxIndex(accountId);
-                        switch(txi){
-                            case(?(txi_)){ // Method-1
-                                if (isERC20 and txi_ > 0){
-                                    await* _syncTxStatus(Nat.sub(txi_,1), false); // isERC20: Deposit Gas
-                                    lastUpdateBalanceItemTime := _now();
-                                };
-                                await* _syncTxStatus(txi_, false); // Deposit ETH/ERC20
-                                lastUpdateBalanceItemTime := _now();
+    
+    private func _updateBalance(_aid: ?AccountId): async* (){ 
+        switch(_aid){
+            case(?aid){
+                assert(aid != _accountId(Principal.fromActor(this), null));
+                switch(Trie.get(balances, keyb(aid), Blob.equal)){
+                    case(?tokenBalances){
+                        for((tokenIdBlob, (account, x)) in Trie.iter(tokenBalances)){
+                            let tokenId = ABI.toHex(Blob.toArray(tokenIdBlob));
+                            let depositingBalance = _getBalance(account, tokenId);
+                            if (depositingBalance > 0){
+                                ignore _subBalance(account, tokenId, depositingBalance);
+                                ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
+                                // mint ckToken
+                                let toid = _mintCkToken(tokenId, account, depositingBalance, null);
+                                await* _ictcSagaRun(toid, false);
                             };
-                            case(_){}; // Method-2
                         };
-                        let depositingBalance = _getBalance(account, tokenId);
-                        if (depositingBalance > 0){
-                            ignore _subBalance(account, tokenId, depositingBalance);
-                            ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
-                            // mint ckToken
-                            let toid = _mintCkToken(tokenId, account, depositingBalance, txi);
-                            await* _ictcSagaRun(toid, false);
-                            lastUpdateBalanceItemTime := _now();
+                    };
+                    case(_){};
+                };
+            };
+            case(_){
+                for ((accountId, tokenBalances) in Trie.iter(balances)){
+                    if (accountId != _accountId(Principal.fromActor(this), null)){ // Non-pool account
+                        for((tokenIdBlob, (account, x)) in Trie.iter(tokenBalances)){
+                            let tokenId = ABI.toHex(Blob.toArray(tokenIdBlob));
+                            let depositingBalance = _getBalance(account, tokenId);
+                            if (depositingBalance > 0){
+                                ignore _subBalance(account, tokenId, depositingBalance);
+                                ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
+                                // mint ckToken
+                                let toid = _mintCkToken(tokenId, account, depositingBalance, null);
+                                await* _ictcSagaRun(toid, false);
+                            };
                         };
                     };
                 };
@@ -2454,12 +2520,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         for ((accountId, txi) in Trie.iter(deposits)){
             switch(Trie.get(transactions, keyn(txi), Nat.equal)){
                 case(?(tx, ts, cts)){
-                    // 20 minutes
                     let coveredTs = Option.get(cts, ts);
-                    if (_now() > coveredTs + 20*60 and Array.size(tx.txHash) < 6){
+                    if (_now() > coveredTs + 30*60 and Array.size(tx.txHash) < 5){
                         try{
                             await* _syncTxStatus(txi, true);
-                            ignore await* _coverTx(txi, false, ?true, 0, true);
+                            ignore await* _coverTx(txi, false, ?true, 0, true, true);
                         }catch(e){};
                     };
                 };
@@ -2467,300 +2532,174 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
-    private var lastUpdateBalanceForMode2Time : Nat = 0;
-    private func _updataBalanceForMode2() : async* (){
-        if (_notPaused() and _now() >= lastUpdateBalanceForMode2Time + 60 and _now() > lastUpdateMode2TxnTime + 15){
-            lastUpdateBalanceForMode2Time := _now();
-            lastUpdateMode2TxnTime := _now();
-            let mainAccoundId = _accountId(Principal.fromActor(this), null);
-            let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
-            label Tasks for ((k, (_txHash, _account, _signature, _isVerified, _ts)) in Trie.iter(pendingDepositTxns)){
-                lastUpdateMode2TxnTime := _now();
-                let accountId = _accountId(_account.owner, _account.subaccount);
-                try{
-                    if (_isPendingTxn(_txHash)){
-                        let (succeeded, txn, blockHeight, status, txNonce, jsons) = await* _fetchTxn(_txHash);
-                        lastUpdateMode2TxnTime := _now();
-                        switch(succeeded, txn, blockHeight, status){
-                            case(true, ?(tokenTxn), blockHeight, #Confirmed){
-                                if (not(_isCkToken(tokenTxn.token)) and _isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"Not a supported token.");
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Not a supported token."})), ?accountId);
-                                    continue Tasks;
-                                };
-                                if (_getBlockNumber() >= blockHeight + VALID_BLOCKS_FOR_CLAIMING_TXN and _isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?("It has expired (valid for "# Nat.toText(VALID_BLOCKS_FOR_CLAIMING_TXN) #" blocks)."));
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "It expired (valid for 648000 blocks)."})), ?accountId);
-                                    continue Tasks;
-                                };
-                                if (mainAddress != tokenTxn.to and _isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"The recipient is not the ck address of this Canister.");
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "The recipient is not the ck address of this Canister."})), ?accountId);
-                                    continue Tasks;
-                                };
-                                if (tokenTxn.value == 0 and _isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"The value of the transaction cannot be zero.");
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "The value of the transaction cannot be zero."})), ?accountId);
-                                    continue Tasks;
-                                };
-                                let message = _depositingMsg(_txHash, _account);
-                                let rsv = await* ETHCrypto.convertSignature(_signature, message, tokenTxn.from, ck_chainId, utils_);
-                                let address = await* ETHCrypto.recover(rsv, ck_chainId, message, utils_);
-                                lastUpdateMode2TxnTime := _now();
-                                if (address == tokenTxn.from and mainAddress == tokenTxn.to and _isPendingTxn(_txHash)){ 
-                                    _verifyPendingDepositTxn(_txHash); // verified
-                                    _putDepositTxn(_account, _txHash, _signature, #Pending, null, null);
-                                    let (succeeded, blockHeight, txStatus, jsons) = await* _fetchTxReceipt(_txHash);
-                                    lastUpdateMode2TxnTime := _now();
-                                    if (succeeded and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirmations and _isPendingTxn(_txHash)){
-                                        let isERC20 = tokenTxn.token != eth_;
-                                        //let gasFee = _getEthGas(tokenTxn.token); // {.... maxFee }eth Wei
-                                        let ckFee = _getFixedFee(tokenTxn.token); // {eth; token} Wei 
-                                        var amount: Wei = tokenTxn.value;
-                                        var fee: Wei = ckFee.token;
-                                        if (amount > fee){
-                                            amount -= fee;
-                                            ignore _addFeeBalance(tokenTxn.token, fee);
-                                            let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                                            ignore _mintCkToken(tokenTxn.token, feeAccount, fee, null);
-                                            ignore _addBalance(_account, tokenTxn.token, amount);
-                                            _confirmDepositTxn(_txHash, #Confirmed, ?(tokenTxn), ?_now(), null);
-                                            _removePendingDepositTxn(_txHash);
-                                            _putAddressAccount(tokenTxn.token, tokenTxn.from, _account);
-                                            _putTxAccount(tokenTxn.token, _txHash, tokenTxn.from, _account);
-                                            ignore _putEvent(#claimDepositResult(#ok({token = tokenTxn.token; account = _account; from = tokenTxn.from; amount = amount; fee = ?fee; txHash = _txHash; signature = ABI.toHex(_signature)})), ?accountId);
-                                            _stats(tokenTxn.token, #Minting, amount);
-                                        }else{
-                                            _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"The amount is too low.");
-                                            _removePendingDepositTxn(_txHash);
-                                            ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "The amount is too low."})), ?accountId);
-                                        };
-                                    }else if (succeeded and (blockHeight == 0 or _getBlockNumber() < blockHeight + minConfirmations) and _isPendingTxn(_txHash)){
-                                        //
-                                    }else if (not(succeeded) and blockHeight > 0 and _getBlockNumber() >= blockHeight + minConfirmations and _isPendingTxn(_txHash)){
-                                        _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"Transaction failure.");
-                                        _removePendingDepositTxn(_txHash);
-                                        ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Transaction failure."})), ?accountId);
-                                    }else if (not(succeeded) and _isPendingTxn(_txHash)){
-                                        _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"Fetching transaction receipt error.");
-                                        _removePendingDepositTxn(_txHash);
-                                        ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Fetching transaction receipt error."})), ?accountId);
+
+    private func _method2TxnSuccessCallback(_account: Account, _txHash: TxHash, _tokenTxn: Minter.TokenTxn, _signature: [Nat8]) : [SagaTM.Toid]{
+        let tokenTxn = _tokenTxn;
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        let ckFee = _getFixedFee(tokenTxn.token); // {eth; token} Wei 
+        var toids: [SagaTM.Toid] = [];
+        var amount: Wei = tokenTxn.value;
+        var fee: Wei = ckFee.token;
+        if (amount > fee){
+            amount -= fee;
+            ignore _addFeeBalance(tokenTxn.token, fee);
+            let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+            let toid = _mintCkToken(tokenTxn.token, feeAccount, fee, null);
+            toids := Tools.arrayAppend(toids, [toid]);
+            ignore _addBalance(_account, tokenTxn.token, amount);
+            _confirmDepositTxn(_txHash, #Confirmed, ?(tokenTxn), ?_now(), null);
+            _removePendingDepositTxn(_txHash);
+            _putAddressAccount(tokenTxn.token, tokenTxn.from, _account);
+            _putTxAccount(tokenTxn.token, _txHash, tokenTxn.from, _account);
+            ignore _putEvent(#claimDepositResult(#ok({token = tokenTxn.token; account = _account; from = tokenTxn.from; amount = amount; fee = ?fee; txHash = _txHash; signature = ABI.toHex(_signature)})), ?accountId);
+            _stats(tokenTxn.token, #Minting, amount);
+            let depositingBalance = Nat.min(amount, _getBalance(_account, tokenTxn.token));
+            if (depositingBalance > 0){
+                ignore _subBalance(_account, tokenTxn.token, depositingBalance);
+                ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenTxn.token, depositingBalance);
+                // mint ckToken
+                let toid = _mintCkToken(tokenTxn.token, _account, depositingBalance, null);
+                toids := Tools.arrayAppend(toids, [toid]);
+            };
+        };
+        return toids;
+    };
+    private func _method2TxnFailedCallback(_account: Account, _txHash: TxHash, _signature: [Nat8], _message: Text) : 
+    (status: Status, message: ?Text, token: ?Text, amount: ?Nat){
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?_message);
+        _removePendingDepositTxn(_txHash);
+        ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = _message})), ?accountId);
+        return (#Failure, ?_message, null, null);
+    };
+    private func _syncMethod2TxnStatus(_txHash: TxHash) : async* (status: Status, message: ?Text, token: ?Text, amount: ?Nat){
+        let mainAccoundId = _accountId(Principal.fromActor(this), null);
+        let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
+        let txhBlob = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
+        switch(Trie.get(depositTxns, keyb(txhBlob), Blob.equal)){
+            case(?(item, ts)){ 
+                if (item.status == #Failure){
+                    return (#Failure, item.error, null, null);
+                }else if (item.status == #Confirmed){
+                    return (#Confirmed, null, null, null);
+                }else{ // #Pending
+                    switch(Trie.get(pendingDepositTxns, keyb(txhBlob), Blob.equal)){
+                        case(?(txHash, account, signature, isVerified, ts)){
+                            let accountId = _accountId(account.owner, account.subaccount);
+                            let (succeeded, txn, blockHeight, status, nonce, jsons) = await* _fetchTxn(_txHash);
+                            switch(succeeded, txn, status){
+                                case(true, ?(tokenTxn), #Confirmed){
+                                    if (not(_isCkToken(tokenTxn.token)) and _isPendingTxn(txHash)){
+                                        let message = "Not a supported token.";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
                                     };
-                                }else if (_isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"Signature verification failure.");
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Signature verification failure."})), ?accountId);
+                                    if (_getBlockNumber() >= blockHeight + VALID_BLOCKS_FOR_CLAIMING_TXN and _isPendingTxn(txHash)){
+                                        let message = "It has expired (valid for "# Nat.toText(VALID_BLOCKS_FOR_CLAIMING_TXN) #" blocks).";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
+                                    };
+                                    if (mainAddress != tokenTxn.to and _isPendingTxn(txHash)){
+                                        let message = "The recipient is not the ck address of this Canister.";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
+                                    };
+                                    if (tokenTxn.value == 0 and _isPendingTxn(txHash)){
+                                        let message = "The value of the transaction cannot be zero.";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
+                                    };
+                                    // validate
+                                    let message: [Nat8] = _depositingMsg(txHash, account);
+                                    let msgHash = ETHCrypto.sha3(message);
+                                    var address = ""; 
+                                    switch(ETHCrypto.recover(signature, message, msgHash, tokenTxn.from, ck_chainId, ecContext)){
+                                        case(#ok(addr)){ address := addr };
+                                        case(#err(e)){ throw Error.reject(e); };
+                                    };
+                                    if (address == tokenTxn.from and mainAddress == tokenTxn.to and _isPendingTxn(txHash)){ 
+                                        _validatePendingDepositTxn(txHash); // validated
+                                        _putDepositTxn(account, txHash, signature, #Pending, null, null);
+                                        let (txSucceeded, txBlockHeight, txStatus, txJsons) = await* _fetchTxReceipt(txHash);
+                                        if (txSucceeded and txBlockHeight > 0 and _getBlockNumber() >= txBlockHeight + minConfirmations and _isPendingTxn(txHash)){
+                                            // let isERC20 = tokenTxn.token != eth_;
+                                            //let gasFee = _getEthGas(tokenTxn.token); // {.... maxFee }eth Wei
+                                            let ckFee = _getFixedFee(tokenTxn.token); // {eth; token} Wei 
+                                            var amount: Wei = tokenTxn.value;
+                                            var fee: Wei = ckFee.token;
+                                            if (amount > fee){
+                                                let _toids = _method2TxnSuccessCallback(account, txHash, tokenTxn, signature);
+                                                // if (toids.size() > 0){
+                                                //     await* _ictcSagaRun(0, false);
+                                                // };
+                                                return (#Confirmed, ?"txn is confirmed.", ?tokenTxn.token, ?amount);
+                                            }else{
+                                                let message = "The amount is too low.";
+                                                return _method2TxnFailedCallback(account, txHash, signature, message);
+                                            };
+                                        }else if (txSucceeded and (txBlockHeight == 0 or _getBlockNumber() < txBlockHeight + minConfirmations) and _isPendingTxn(txHash)){
+                                            return (#Pending, ?"The transaction is pending.", null, null);
+                                        }else if (not(txSucceeded) and txBlockHeight > 0 and _getBlockNumber() >= txBlockHeight + minConfirmations and _isPendingTxn(txHash)){
+                                            let message = "Failed transaction.";
+                                            return _method2TxnFailedCallback(account, txHash, signature, message);
+                                        }else if (not(txSucceeded) and _isPendingTxn(txHash)){
+                                            let message = "An error occurred while fetching the transaction.";
+                                            return _method2TxnFailedCallback(account, txHash, signature, message);
+                                        }else{
+                                            return (#Unknown, null, null, null);
+                                        };
+                                    }else if (_isPendingTxn(txHash)){
+                                        let message = "Signature validation failed.";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
+                                    }else{
+                                        return (#Unknown, null, null, null);
+                                    };
                                 };
-                            };
-                            case(true, ?(tokenTxn), blockHeight, #Pending){
-                                if (_isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Pending, null, ?"The transaction is pending.");
+                                case(true, ?(tokenTxn), #Pending){
+                                    if (_isPendingTxn(txHash)){
+                                        _putDepositTxn(account, txHash, signature, #Pending, null, ?"The transaction is pending.");
+                                    };
+                                    return (#Pending, ?"The transaction is pending.", null, null);
                                 };
-                            };
-                            case(false, _, _, _){
-                                if (_now() > _ts + 20*60 and _isPendingTxn(_txHash)){
-                                    _putDepositTxn(_account, _txHash, _signature, #Failure, null, ?"Error: The transaction was not found within 20 minutes. Please wait for the transaction confirmation and submit again.");
-                                    _removePendingDepositTxn(_txHash);
-                                    ignore _putEvent(#claimDepositResult(#err({account = _account; txHash = _txHash; signature = ABI.toHex(_signature); error = "Error: The transaction was not found within 20 minutes. Please wait for the transaction confirmation and submit again."})), ?accountId);
-                                }else{
-                                    // will retry
-                                }; 
-                            };
-                            case(_, _, _, _){
-                                // will retry
+                                case(false, _, _){
+                                    if (_now() > ts + 20*60 and _isPendingTxn(txHash)){
+                                        let message = "Error: The transaction was not found within 20 minutes. Please wait for the transaction confirmation and submit again.";
+                                        return _method2TxnFailedCallback(account, txHash, signature, message);
+                                    }else{
+                                        return (#Unknown, ?"Unknown reason.", null, null);
+                                    }; 
+                                };
+                                case(_, _, _){
+                                    return (#Unknown, ?"Unknown error.", null, null);
+                                };
                             };
                         };
-                    }else{
-                        if (_now() > _ts + 20*60) { _removePendingDepositTxn(_txHash); };
+                        case(_){
+                            throw Error.reject("404: There is no pending txn.");
+                        };
                     };
-                }catch(e){
-                    if (app_debug) { throw Error.reject(Error.message(e)) };
                 };
             };
-            await* _updateBalance();
-        };
-    };
-    private var lastUpdateRetrievalsTime : Nat = 0;
-    private func _updateRetrievals() : async* [(Minter.TxStatus, Timestamp)]{
-        if (_now() >= lastUpdateRetrievalsTime + 60 and _now() > lastUpdateTxsTime + 15){
-            lastUpdateRetrievalsTime := _now();
-            lastUpdateTxsTime := _now();
-            for (txi in List.toArray(pendingRetrievals).vals()){
-                lastUpdateTxsTime := _now();
-                await* _syncTxStatus(txi, false);
+            case(_){
+                throw Error.reject("404: txn does not exist.");
             };
-            let res = List.toArray(List.mapFilter<TxIndex, (Minter.TxStatus, Timestamp)>(pendingRetrievals, func (txi: TxIndex): ?(Minter.TxStatus, Timestamp){
-                switch(Trie.get(transactions, keyn(txi), Nat.equal)){
-                    case(?(tx, ts, cts)){
-                        if (_now() > ts + 600){ return ?(tx, ts) }else{ return null};
-                    };
-                    case(_){ return null };
-                };
-            }));
-            return res;
         };
-        return [];
     };
-
-    // private func _calcuConfirmations(_rid: RpcRequestId, _newRequestResult: [Value], _minConfirmedNum: Nat) : ([Value], Nat, [([Value], Nat)]){
-    //     var isMatched: Bool = false;
-    //     var result: [Value] = [];
-    //     var maxNum: Nat = 0;
-    //     var confirmations: [([Value], Nat)] = [];
-    //     var newConfirmations: [([Value], Nat)] = [];
-    //     switch(Trie.get(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal)){
-    //         case(?(_confirmations, _ts)){
-    //             confirmations := _confirmations;
-    //         };
-    //         case(_){};
-    //     };
-    //     for ((r, n) in confirmations.vals()){
-    //         if (r == _newRequestResult){
-    //             isMatched := true;
-    //             newConfirmations := Tools.arrayAppend(newConfirmations, [(r, n + 1)]);
-    //             if (n+1 > maxNum){
-    //                 result := r;
-    //                 maxNum := n + 1;
-    //             };
-    //         }else{
-    //             newConfirmations := Tools.arrayAppend(newConfirmations, [(r, n)]);
-    //             if (n > maxNum){
-    //                 result := r;
-    //                 maxNum := n;
-    //             };
-    //         };
-    //     };
-    //     if (not(isMatched) and _newRequestResult.size() > 0){
-    //         newConfirmations := Tools.arrayAppend(newConfirmations, [(_newRequestResult, 1)]);
-    //         if (maxNum == 0){
-    //             result := _newRequestResult;
-    //             maxNum := 1;
-    //         };
-    //     };
-    //     if (maxNum >= _minConfirmedNum){
-    //         ck_rpcRequestConsensusTemps := Trie.remove(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal).0;
-    //     }else{
-    //         ck_rpcRequestConsensusTemps := Trie.put(ck_rpcRequestConsensusTemps, keyn(_rid), Nat.equal, (newConfirmations, _now())).0;
-    //     };
-    //     ck_rpcRequestConsensusTemps := Trie.filter(ck_rpcRequestConsensusTemps, func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): Bool{
-    //         _now() < v.1 + 12 * 3600;
-    //     });
-    //     return (result, maxNum, newConfirmations);
-    // };
-    
-    // private func _putRpcRequestLog(_rid: RpcRequestId, _log: RpcFetchLog, _minConfirmedNum: Nat): RpcRequestStatus{
-    //     let thisSucceedNum : Nat = switch(_log.status){ case(#ok(v)){ 1 }; case(_){ 0 } };
-    //     var consResult: RpcRequestStatus = #pending;
-    //     switch(Trie.get(ck_rpcRequests, keyn(_rid), Nat.equal)){
-    //         case(?(item)){
-    //             var confirmedNum = item.confirmed;
-    //             consResult := item.status;
-    //             var requests: [RpcFetchLog] = item.requests;
-    //             requests := Tools.arrayAppend(requests, [_log]);
-    //             if (thisSucceedNum > 0 and consResult == #pending){
-    //                 switch(_log.status){
-    //                     case(#ok(v)){
-    //                         let (values, maxConfirmedNum, stats) = _calcuConfirmations(_rid, v, _minConfirmedNum);
-    //                         confirmedNum := maxConfirmedNum;
-    //                         if (confirmedNum >= _minConfirmedNum){
-    //                             consResult := #ok(values);
-    //                         };
-    //                     };
-    //                     case(_){};
-    //                 };
-    //             };
-    //             ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
-    //                 confirmed = confirmedNum; 
-    //                 status = consResult;
-    //                 requests = requests; 
-    //             }).0;
-    //         };
-    //         case(_){
-    //             if (thisSucceedNum > 0 and thisSucceedNum >= _minConfirmedNum){
-    //                 consResult := _log.status;
-    //             };
-    //             ck_rpcRequests := Trie.put(ck_rpcRequests, keyn(_rid), Nat.equal, {
-    //                 confirmed = thisSucceedNum; 
-    //                 status = consResult;
-    //                 requests = [_log]; 
-    //             }).0;
-    //         };
-    //     };
-    //     return consResult;
-    // };
-    // private func _updateRpcProviderStats(_keeper: AccountId, _isSuccess: Bool): (){
-    //     switch(Trie.get(ck_rpcProviders, keyb(_keeper), Blob.equal)){
-    //         case(?(provider)){
-    //             var preHealthCheck = provider.preHealthCheck;
-    //             var healthCheck = provider.healthCheck;
-    //             if (_now() >= healthCheck.time + healthinessIntervalSeconds){
-    //                 let lastHealthinessSlotTime = _now() / healthinessIntervalSeconds * healthinessIntervalSeconds;
-    //                 preHealthCheck := healthCheck;
-    //                 healthCheck := {time = lastHealthinessSlotTime; calls = 0; errors = 0; recentPersistentErrors = ?0};
-    //             };
-    //             var recentPersistentErrors = Option.get(healthCheck.recentPersistentErrors, 0);
-    //             if (_isSuccess){
-    //                 recentPersistentErrors := 0;
-    //             }else{
-    //                 recentPersistentErrors += 1;
-    //             };
-    //             healthCheck := {
-    //                 time = healthCheck.time; 
-    //                 calls = healthCheck.calls + 1; 
-    //                 errors = healthCheck.errors + (if (_isSuccess){ 0 }else{ 1 }); 
-    //                 recentPersistentErrors = ?recentPersistentErrors; 
-    //             };
-    //             var status = provider.status;
-    //             if (recentPersistentErrors >= (if (app_debug){ 10 }else{ 6 }) or (healthCheck.calls >= 20 and healthCheck.errors * 100 / healthCheck.calls > 30)){
-    //                 status := #Unavailable;
-    //             };
-    //             ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(_keeper), Blob.equal, {
-    //                 name = provider.name; 
-    //                 url = provider.url; 
-    //                 keeper = provider.keeper;
-    //                 status = status; 
-    //                 calls = provider.calls + 1; 
-    //                 errors = provider.errors + (if (_isSuccess){ 0 }else{ 1 }); 
-    //                 preHealthCheck = preHealthCheck;
-    //                 healthCheck = healthCheck;
-    //                 latestCall = _now();
-    //             }).0;
-    //         };
-    //         case(_){};
-    //     };
-    // };
-    // private func _preRpcLog(_id: RpcId, _url: Text, _input: Text) : (){
-    //     switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
-    //         case(?(log)){ assert(false) };
-    //         case(_){ 
-    //             ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
-    //                 url= _url;
-    //                 time = _now(); 
-    //                 input = _input; 
-    //                 result = null; 
-    //                 err = null
-    //             }).0; 
-    //         };
-    //     };
-    // };
-    // private func _postRpcLog(_id: RpcId, _result: ?Text, _err: ?Text) : (){
-    //     switch(Trie.get(ck_rpcLogs, keyn(_id), Nat.equal)){
-    //         case(?(log)){
-    //             ck_rpcLogs := Trie.put(ck_rpcLogs, keyn(_id), Nat.equal, {
-    //                 url = log.url;
-    //                 time = log.time; 
-    //                 input = log.input; 
-    //                 result = _result; 
-    //                 err = _err
-    //             }).0; 
-    //         };
-    //         case(_){};
-    //     };
-    // };
+    private func _method2TxnNotify(_account: Account, _txHash: TxHash) : async* (){
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        let txHashBlob = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
+        let saga = _getSaga();
+        let toid : Nat = saga.create("deposit_method2(evm->ic)", #Backward, ?txHashBlob, null);
+        let task_1 = _buildTask(?txHashBlob, Principal.fromActor(this), #custom(#validateTx(_txHash)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let comp_1 = _buildTask(null, Principal.fromActor(this), #__skip, [], 0, null, null);
+        let _ttid_1 = saga.push(toid, task_1, ?comp_1, null);
+        saga.close(toid);
+        // await* _ictcSagaRun(toid, false);
+        let _f = _getSaga().run(toid);
+    };
+    private func _clearMethod2Txn() : async* (){
+        for ((k, (txHash, account, signature, isVerified, ts)) in Trie.iter(pendingDepositTxns)){
+            if (_now() > ts + 2*20*60){
+                ignore _method2TxnFailedCallback(account, txHash, signature, "");
+            }
+        };
+    };
     private func _putEvent(_event: Event, _a: ?AccountId) : BlockHeight{
         blockEvents := ICEvents.putEvent<Event>(blockEvents, blockIndex, _event);
         switch(_a){
@@ -2827,9 +2766,19 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public shared(msg) func get_deposit_address(_account : Account): async EthAddress{
         assert(_notPaused() or _onlyOwner(msg.caller));
         assert(depositMethod == 1 or depositMethod == 3);
+        if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
+            throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
+        };
         let accountId = _accountId(_account.owner, _account.subaccount);
+        if (not(_dosCheck(accountId, 15)) or not(_dosCheck(_accountId(msg.caller, null), 15))){
+            throw Error.reject("400: The network is busy, please try again later!");
+        };
         if (Option.isSome(_getDepositingTxIndex(accountId))){
             throw Error.reject("405: You have a deposit waiting for network confirmation.");
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         let account = await* _getEthAddress(accountId, false);
         return account.0;
@@ -2842,6 +2791,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             return #Err(#GenericError({code = 400; message = "400: The system has been suspended!"}))
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         assert(depositMethod == 1 or depositMethod == 3);
         // if (not(_checkAsyncMessageLimit())){
@@ -2857,7 +2810,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         _setLatestVisitTime(msg.caller);
         let res = await* _depositNotify(_token, _account);
-        await* _updateBalance(); // for all accounts
         lastExecutionDuration := Time.now() - __start;
         if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
         return res;
@@ -2870,6 +2822,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             return #Err(#GenericError({code = 400; message = "400: The system has been suspended!"}))
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         assert(depositMethod == 2 or depositMethod == 3);
         assert(_txHash.size() == 66); // text
@@ -2885,40 +2841,77 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _setLatestVisitTime(msg.caller);
         let txHash = _toLower(_txHash);
         if (_isConfirmedTxn(txHash) or _isPendingTxn(txHash)){ // important!
-            await* _updataBalanceForMode2();
             return #Err(#GenericError({ message = "TxHash already exists."; code = 402 }))
+        }else{
+            // New claiming
+            _putPendingDepositTxn(_account, txHash, _signature);
+            _putDepositTxn(_account, txHash, _signature, #Pending, null, null);
+            let blockIndex = _putEvent(#claimDeposit({account = _account; txHash = txHash; signature = ABI.toHex(_signature)}), ?accountId);
+            await* _method2TxnNotify(_account, txHash);
+            return #Ok(blockIndex);
         };
-        _putPendingDepositTxn(_account, txHash, _signature);
-        _putDepositTxn(_account, txHash, _signature, #Pending, null, null);
-        let blockIndex = _putEvent(#claimDeposit({account = _account; txHash = txHash; signature = ABI.toHex(_signature)}), ?accountId);
-        await* _updataBalanceForMode2();
-        return #Ok(blockIndex);
-    };
-    public shared(msg) func update_claims() : async (){
-        // for all users
-        _checkICTCError();
-        if (not(_notPaused() or _onlyOwner(msg.caller))){
-            throw Error.reject("400: The system has been suspended!");
-        };
-        // if (not(_checkAsyncMessageLimit())){
-        //     countRejections += 1; 
-        //     throw Error.reject("405: IC network is busy, please try again later.");
-        // };
-        if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
-            throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
-        };
-        let accountId = _accountId(msg.caller, null);
-        if (not(_dosCheck(accountId, 5))){
-            throw Error.reject("400: The network is busy, please try again later!");
-        };
-        _setLatestVisitTime(msg.caller);
-        await* _updataBalanceForMode2();
     };
     /// Retrieve
     public query func get_withdrawal_account(_account : Account) : async Minter.Account{
         // assert(_notPaused() or _onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
         return {owner=Principal.fromActor(this); subaccount=?Blob.toArray(accountId)};
+    };
+
+    private func _ictcSendNativeToken(_account: Account, _tokenId: EthAddress, _amount: Nat, _gasFee: EthGas, _ckFee: CkFee, _to: EthAddress, _burntBlockHeight: Nat) : (txi: TxIndex, toid: SagaTM.Toid){
+        let tokenId = _tokenId;
+        let account = _account;
+        let accountId = _accountId(account.owner, account.subaccount);
+        let toAddress = _to;
+        let height = _burntBlockHeight;
+        let retrieveAccount : Minter.Account = { owner = Principal.fromActor(this); subaccount = ?Blob.toArray(accountId); };
+        let mainAccount: Account = {owner = Principal.fromActor(this); subaccount = null };
+        let mainAccoundId = _accountId(Principal.fromActor(this), null);
+        let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
+        let gasFee = _gasFee; // for ETH or ERC20
+        let ckFee = _ckFee; // {eth; token} Wei 
+        var sendingAmount = _amount;
+        var sendingFee: Wei = 0;
+        if (sendingAmount > ckFee.token and sendingAmount >= _getTokenMinAmount(tokenId)){
+            sendingFee := ckFee.token;
+            sendingAmount -= ckFee.token;
+        };
+        ignore _subBalance(mainAccount, tokenId, Nat.min(_getBalance(mainAccount, tokenId), _amount)); 
+        ignore _addFeeBalance(tokenId, ckFee.token);
+        let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
+        ignore _mintCkToken(tokenId, feeAccount, ckFee.token, null);
+        ignore _subFeeBalance(eth_, Nat.min(_getFeeBalance(eth_), gasFee.maxFee));
+        ignore _burnCkToken(eth_, Blob.fromArray(sa_one), gasFee.maxFee, feeAccount);
+        let txi = _newTx(#Withdraw, account, tokenId, mainAddress, toAddress, sendingAmount, gasFee);
+        let status : Minter.RetrieveStatus = {
+            account = account;
+            retrieveAccount = retrieveAccount; // ck token about to be burned
+            burnedBlockIndex = height;
+            ethAddress = toAddress;
+            amount = sendingAmount; 
+            txIndex = txi;
+        };
+        retrievals := Trie.put(retrievals, keyn(txi), Nat.equal, status).0;
+        _putWithdrawal(accountId, txi);
+        _putRetrievingTxIndex(txi);
+        _putAddressAccount(tokenId, toAddress, account);
+        // ICTC
+        let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
+        let saga = _getSaga();
+        let toid : Nat = saga.create("retrieve(ic->evm)", #Forward, ?txiBlob, null);
+        let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#getNonce(txi, ?[toid])), [], 0, null, null);
+        let _ttid1 = saga.push(toid, task1, null, null);
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(txi)), [], 0, null, null);
+        let _ttid2 = saga.push(toid, task2, null, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(txi)), [], 0, null, null);
+        let _ttid3 = saga.push(toid, task3, null, null);
+        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(txi)), [], 0, null, null);
+        let _ttid4 = saga.push(toid, task4, null, null);
+        let task5 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(txi, false)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let _ttid5 = saga.push(toid, task5, null, null);
+        saga.close(toid);
+        _updateTxToids(txi, [toid]);
+        return (txi, toid);
     };
     public shared(msg) func retrieve(_token: ?EthAddress, _address: EthAddress, _amount: Wei, _sa: ?[Nat8]) : async { 
         #Ok : Minter.RetrieveResult; //{ block_index : Nat64 };
@@ -2929,10 +2922,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             return #Err(#GenericError({code = 400; message = "400: The system has been suspended!"}))
         };
-        // if (not(_checkAsyncMessageLimit())){
-        //     countRejections += 1; 
-        //     return #Err(#GenericError({code = 405; message="405: IC network is busy, please try again later."}));
-        // };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
+        };
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({code = 400; message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
@@ -2943,11 +2936,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _setLatestVisitTime(msg.caller);
         let account: Minter.Account = {owner=msg.caller; subaccount=_sa};
         let withdrawalIcrc1Account: ICRC1.Account = {owner=Principal.fromActor(this); subaccount=?accountId};
-        let withdrawalAccount : Minter.Account = { owner = msg.caller; subaccount = ?Blob.toArray(accountId); };
-        let mainAccoundId = _accountId(Principal.fromActor(this), null);
         let mainAccount: Account = {owner = Principal.fromActor(this); subaccount = null };
-        let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
-        let (mainAddress, mainNonce) = _getEthAddressQuery(mainAccoundId);
         let toAddress = _toLower(_address);
         if (Text.size(_address) != 42){
             return #Err(#GenericError({code = 402; message="402: Address is not available."}));
@@ -2956,8 +2945,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             return #Err(#GenericError({code = 402; message="402: There are too many retrieval operations and the system is busy, please try again later."}));
         };
         let tokenId = _toLower(Option.get(_token, eth_));
-        let isERC20 = tokenId != eth_;
-        // let icrc1Fee = ckethFee_; // Wei
         if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
             let _gasPrice = await* _fetchGasPrice();
         };
@@ -2989,41 +2976,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         //Burn
         switch(await* _burnCkToken2(tokenId, accountId, _address, _amount, account)){
             case(#Ok(height)){
-                ignore _subBalance(mainAccount, tokenId, Nat.min(_getBalance(mainAccount, tokenId), _amount)); 
-                ignore _addFeeBalance(tokenId, ckFee.token);
-                let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                ignore _mintCkToken(tokenId, feeAccount, ckFee.token, null);
-                ignore _subFeeBalance(eth_, Nat.min(_getFeeBalance(eth_), gasFee.maxFee));
-                ignore _burnCkToken(eth_, Blob.fromArray(sa_one), gasFee.maxFee, feeAccount);
-                //totalSent += _amount;
-                let txi = _newTx(#Withdraw, account, tokenId, mainAddress, toAddress, sendingAmount, gasFee);
-                let status : Minter.RetrieveStatus = {
-                    account = account;
-                    retrieveAccount = withdrawalAccount;
-                    burnedBlockIndex = height;
-                    ethAddress = toAddress;
-                    amount = sendingAmount; 
-                    txIndex = txi;
-                };
-                retrievals := Trie.put(retrievals, keyn(txi), Nat.equal, status).0;
-                _putWithdrawal(accountId, txi);
-                _putRetrievingTxIndex(txi);
-                _putAddressAccount(tokenId, toAddress, account);
-                // ICTC
-                let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
-                let saga = _getSaga();
-                let toid : Nat = saga.create("retrieve", #Forward, ?accountId, null);
-                let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(txi, ?[toid])), [], 0);
-                let ttid1 = saga.push(toid, task1, null, null);
-                let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(txi)), [], 0);
-                let ttid2 = saga.push(toid, task2, null, null);
-                let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
-                let ttid3 = saga.push(toid, task3, null, null);
-                let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
-                let ttid4 = saga.push(toid, task4, null, null);
-                saga.close(toid);
-                _updateTxToids(txi, [toid]);
-                await* _ictcSagaRun(toid, false);
+                let (txi, toid) = _ictcSendNativeToken(account, tokenId, _amount, gasFee, ckFee, toAddress, height);
+                // await* _ictcSagaRun(toid, false);
+                let _f = _getSaga().run(toid);
                 lastExecutionDuration := Time.now() - __start;
                 if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
                 ignore _putEvent(#withdraw({txIndex = txi; toid = toid; account = account; address = toAddress; token = tokenId; amount = sendingAmount; fee = ?sendingFee}), ?accountId);
@@ -3043,26 +2998,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
-    public shared(msg) func update_retrievals() : async (sending: [(Minter.TxStatus, Timestamp)]){
-        // for all users
-        _checkICTCError();
-        if (not(_notPaused() or _onlyOwner(msg.caller))){
-            throw Error.reject("400: The system has been suspended!");
-        };
-        // if (not(_checkAsyncMessageLimit())){
-        //     countRejections += 1; 
-        //     throw Error.reject("405: IC network is busy, please try again later.");
-        // };
-        if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
-            throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
-        };
-        let accountId = _accountId(msg.caller, null);
-        if (not(_dosCheck(accountId, 5))){
-            throw Error.reject("400: The network is busy, please try again later!");
-        };
-        _setLatestVisitTime(msg.caller);
-        return await* _updateRetrievals();
-    };
     public shared(msg) func cover_tx(_txi: TxIndex, _sa: ?[Nat8]) : async ?BlockHeight{
         // if (not(_checkAsyncMessageLimit())){
         //     countRejections += 1; 
@@ -3071,6 +3006,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
+        };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             throw Error.reject("400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!");
@@ -3084,19 +3023,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         switch(Trie.get(transactions, keyn(_txi), Nat.equal)){
             case(?(tx, ts, cts)){
                 let coveredTs = Option.get(cts, ts);
-                if (_now() < coveredTs + 20*60){ // 20 minuts
-                    throw Error.reject("400: Please do this 20 minutes after the last status update. Last Updated: " # Nat.toText(coveredTs) # " (timestamp).");
+                if (_now() < coveredTs + 30*60){ // 30 minuts
+                    throw Error.reject("400: Please do this 30 minutes after the last status update. Last Updated: " # Nat.toText(coveredTs) # " (timestamp).");
                 };
                 if (Array.size(tx.txHash) > 5 and not(_onlyOwner(msg.caller))){
                     throw Error.reject("400: Covering the transaction can be submitted up to 5 times.");
                 };
-                // let isERC20 = tx.tokenId != eth_;
-                // assert(not(isERC20 and tx.txType == #Deposit)); // #Deposit: only for eth
             };
             case(_){};
         };
         await* _syncTxStatus(_txi, true);
-        return await* _coverTx(_txi, false, ?true, 0, true);
+        return await* _coverTx(_txi, false, ?true, 0, true, true);
     };
     /// Query Functions
     public query func get_minter_address() : async (EthAddress, Nonce){
@@ -3299,7 +3236,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public query func get_rpc_request(_rpcRequestId: RpcRequestId) : async ?RpcRequestConsensus{
         return Trie.get(ck_rpcRequests, keyn(_rpcRequestId), Nat.equal);
     };
-    public func get_rpc_request_temps(): async [(RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp))]{
+    public query func get_rpc_request_temps(): async [(RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp))]{
         return Trie.toArray<RpcRequestId, ([([Value], Nat)], Timestamp), (RpcRequestId, ([([Value], Nat)], Timestamp))>(ck_rpcRequestConsensusTemps, 
             func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): (RpcRequestId, ([([Value], Nat)], Timestamp)){
                 return (k, v);
@@ -3310,14 +3247,19 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
       Keeper section
     ============================== */
     // variant{put = record{"RPC1"; "..."; variant{Available}}}, null
-    public shared(msg) func keeper_setRpc(_act: {#remove; #put:(name: Text, url: Text, status: {#Available; #Unavailable})}, _sa: ?Sa) : async Bool{ 
+    public shared(msg) func keeper_set_rpc(_act: {#remove; #put:(name: Text, url: Text, status: {#Available; #Unavailable})}, _sa: ?Sa) : async Bool{ 
         let accountId = _accountId(msg.caller, _sa);
-        assert(_onlyKeeper(accountId));
+        if (not(_onlyKeeper(accountId))){
+            throw Error.reject("500: You don't have permissions of Keeper.");
+        };
         switch(_act){
             case(#remove){
                 ck_rpcProviders := Trie.remove(ck_rpcProviders, keyb(accountId), Blob.equal).0;
             };
             case(#put(name, url, status)){
+                if (not(_isRpcDomainWhitelist(url))){
+                    throw Error.reject("500: The RPC domain is not whitelisted.");
+                };
                 switch(Trie.get(ck_rpcProviders, keyb(accountId), Blob.equal)){
                     case(?(provider)){
                         ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
@@ -3351,7 +3293,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return true;
     };
     public query func get_keepers(): async TrieList<AccountId, Keeper>{
-        let res = trieItems<AccountId, Keeper>(ck_keepers, 1, 2000);
+        let _res = trieItems<AccountId, Keeper>(ck_keepers, 1, 2000);
     };
     public query func get_rpc_providers(): async TrieList<AccountId, RpcProvider>{
         let res = trieItems<AccountId, RpcProvider>(ck_rpcProviders, 1, 2000);
@@ -3359,7 +3301,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             data = Array.map<(AccountId, RpcProvider), (AccountId, RpcProvider)>(res.data, func (t:(AccountId, RpcProvider)): (AccountId, RpcProvider){
                 (t.0, {
                     name = t.1.name; 
-                    url = "***" # ETHCrypto.strRight(t.1.url, 4); 
+                    url = _getRpcDomain(t.1.url) # "***" # ETHCrypto.strRight(t.1.url, 4); 
                     keeper = t.1.keeper; 
                     status = t.1.status; 
                     calls = t.1.calls; 
@@ -3450,17 +3392,21 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ignore _putEvent(#config({setting = #minRpcConfirmations(_minConfirmations)}), ?_accountId(owner, null));
         return true;
     };
-    public shared(msg) func setDependents(_utilsCanisterId: Principal) : async Bool{ 
-        assert(_onlyOwner(msg.caller));
-        utils_ := _utilsCanisterId;
-        ignore _putEvent(#config({setting = #dependents({utilsTool = _utilsCanisterId})}), ?_accountId(owner, null));
-        return true;
-    };
     public shared(msg) func setDepositMethod(_depositMethod: Nat8) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         depositMethod := _depositMethod;
         ignore _putEvent(#config({setting = #depositMethod(_depositMethod)}), ?_accountId(owner, null));
         return true;
+    };
+
+    public shared(msg) func addRpcWhitelist(_rpcDomain: Text) : async (){
+        assert(_onlyOwner(msg.caller));
+        _addRpcDomainWhitelist(_rpcDomain);
+    };
+    public shared(msg) func removeRpcWhitelist(_rpcDomain: Text) : async (){
+        assert(_onlyOwner(msg.caller));
+        _removeRpcDomainWhitelist(_rpcDomain);
+        _removeProviders(_rpcDomain);
     };
     // record{owner=principal ""; subaccount=null}, opt "Keeper1", null, variant{Normal}
     public shared(msg) func setKeeper(_account: Account, _name: ?Text, _url: ?Text, _status: {#Normal; #Disabled}) : async Bool{ 
@@ -3475,24 +3421,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     status = _status;
                     balance = keeper.balance;
                 }).0;
-                // if (_status == #Disabled){
-                //     switch(Trie.get(ck_rpcProviders, keyb(accountId), Blob.equal)){
-                //         case(?(provider)){
-                //             ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
-                //                 name = provider.name; 
-                //                 url = provider.url; 
-                //                 keeper = provider.keeper;
-                //                 status = #Unavailable; 
-                //                 calls = provider.calls; 
-                //                 errors = provider.errors; 
-                //                 preHealthCheck = provider.preHealthCheck;
-                //                 healthCheck = provider.healthCheck;
-                //                 latestCall = provider.latestCall;
-                //             }).0;
-                //         };
-                //         case(_){};
-                //     };
-                // };
             };
             case(_){
                 ck_keepers := Trie.put(ck_keepers, keyb(accountId), Blob.equal, {
@@ -3595,7 +3523,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         rpcRequestId = null;
                         kytRequestId = null;
                         status = ?#Confirmed;
-                        ts = ?_now();
+                        ts = null;
                     }, null);
                     _removeRetrievingTxIndex(_txIndex);
                     ignore _putEvent(#withdrawResult(#ok({txIndex = _txIndex; account = tx.account; token=tx.tokenId; txid=tx.txHash; amount=tx.amount})), ?accountId);
@@ -3634,7 +3562,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         }; 
         await* _syncTxStatus(_txi, true);
-        return await* _coverTx(_txi, _resetNonce, ?_refetchGasPrice, _amountSub, _autoAdjust);
+        return await* _coverTx(_txi, _resetNonce, ?_refetchGasPrice, _amountSub, _autoAdjust, not(_resetNonce));
     };
     public shared(msg) func rebuildAndContinue(_txi: TxIndex, _toid: SagaTM.Toid, _nonce: {#Remain; #Reset: {spentTxHash: TxHash}}) : async ?BlockHeight{
         // Add compensation tasks to the original ICTC transaction order (original toid).
@@ -3687,22 +3615,24 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         ts = ?_now();
                     };
                     _updateTx(_txi, args, ?_now());
-                    // ICTC
+                    // ICTC compensate
                     let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi))); 
                     let saga = _getSaga();
                     saga.open(_toid);
                     var preTtid0: [Nat] = [];
                     if (_resetNonce){
-                        let task0 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(_txi, ?[_toid])), [], 0);
+                        let task0 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#getNonce(_txi, ?[_toid])), [], 0, null, null);
                         let ttid0 = saga.appendComp(_toid, 0, task0, null);
                         preTtid0 := [ttid0];
                     };
-                    let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(_txi)), preTtid0, 0);
+                    let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(_txi)), preTtid0, 0, null, null);
                     let ttid1 = saga.appendComp(_toid, 0, task1, null);
-                    let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(_txi)), [ttid1], 0);
+                    let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(_txi)), [ttid1], 0, null, null);
                     let ttid2 = saga.appendComp(_toid, 0, task2, null);
-                    let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(_txi)), [ttid2], 0);
+                    let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(_txi)), [ttid2], 0, null, null);
                     let ttid3 = saga.appendComp(_toid, 0, task3, null);
+                    let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(_txi, false)), [ttid3], 0, ?txTaskAttempts, ?_txTaskInterval());
+                    let _ttid4 = saga.appendComp(_toid, 0, task4, null);
                     saga.close(_toid);
                     await* _ictcSagaRun(_toid, true);
                     ignore await* _getSaga().complete(_toid, #Done);
@@ -3757,12 +3687,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
         // let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(txi, ?[toid])), [], 0);
         // let ttid1 = saga.push(toid, task1, null, null);
-        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(txi)), [], 0);
-        let ttid2 = saga.push(toid, task2, null, null);
-        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
-        let ttid3 = saga.push(toid, task3, null, null);
-        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
-        let ttid4 = saga.push(toid, task4, null, null);
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(txi)), [], 0, null, null);
+        let _ttid2 = saga.push(toid, task2, null, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(txi)), [], 0, null, null);
+        let _ttid3 = saga.push(toid, task3, null, null);
+        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(txi)), [], 0, null, null);
+        let _ttid4 = saga.push(toid, task4, null, null);
+        let task5 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(txi, false)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let _ttid5 = saga.push(toid, task5, null, null);
         saga.close(toid);
         await* _ictcSagaRun(toid, false);
         return toid;
@@ -3775,7 +3707,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_ictcAllDone());
         let tokenId = _toLower(Option.get(_token, eth_));
         let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
-        let (mainAddress, mainNonce) = _getEthAddressQuery(_accountId(mainAccount.owner, mainAccount.subaccount));
         let preBalances = await* _getMinterBalance(_token, false);
         var postBalances = preBalances;
         let nativeBalance = preBalances.nativeBalance;
@@ -3868,7 +3799,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     public shared(msg) func setCkTokenWasm(_wasm: Blob, _version: Text) : async (){
         assert(_onlyOwner(msg.caller));
-        assert(_version != _getLatestIcrc1Wasm().1);
+        assert(Option.isNull(Array.find(icrc1WasmHistory, func (t: ([Nat8], Text)): Bool{ _version == t.1 })));
         icrc1WasmHistory := Tools.arrayAppend([(Blob.toArray(_wasm), _version)], icrc1WasmHistory);
         if (icrc1WasmHistory.size() > 32){
             icrc1WasmHistory := Tools.slice(icrc1WasmHistory, 0, ?31);
@@ -3881,8 +3812,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     public query func getCkTokenWasmHistory(): async [(Text, Nat)]{
         return Array.map<([Nat8], Text), (Text, Nat)>(icrc1WasmHistory, func (t: ([Nat8], Text)): (Text, Nat){
-            let wasm = _getLatestIcrc1Wasm();
-            return (wasm.1, wasm.0.size());
+            return (t.1, t.0.size());
         });
     };
     //opt "0xefa83712d45ee530ac215b96390a663c01f2fee0", "USDT", record{totalSupply=null; minAmount=10000000000000000; ckTokenFee=100000000000; fixedFee=1000000000000000; gasLimit=61000; ethRatio=1000000000}
@@ -3905,7 +3835,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             std := #ETH;
         };
         let ic: IC.Self = actor("aaaaa-aa");
-        Cycles.add(INIT_CKTOKEN_CYCLES);
+        Cycles.add<system>(INIT_CKTOKEN_CYCLES);
         let newCanister = await ic.create_canister({ settings = ?{
             freezing_threshold = null;
             controllers = ?[Principal.fromActor(this), Principal.fromText(blackhole_)];
@@ -4085,6 +4015,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         return await* RpcCaller.call(_rpcUrl, _input, _responseSize, RPC_AGENT_CYCLES, ?{function = rpc_call_transform; context = Blob.fromArray([])});
     };
+    public shared(msg) func debug_fetch_address(_account : Account) : async (pubkey:PubKey, ethAccount:EthAccount, address: EthAddress){
+        assert(_onlyOwner(msg.caller));
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        return await* _fetchAccountAddress([accountId]);
+    };
     public shared(msg) func debug_get_address(_account : Account) : async (EthAddress, Nonce){
         assert(_onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -4132,7 +4067,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         return await* _local_createTx(_txi);
     };
-    public shared(msg) func debug_local_signTx(_txi: TxIndex) : async ({txi: Nat; signature: Blob; rawTx: [Nat8]; txHash: TxHash}){
+    public shared(msg) func debug_local_signTx(_txi: TxIndex) : async ({txi: Nat; signature: [Nat8]; rawTx: [Nat8]; txHash: TxHash}){
         assert(_onlyOwner(msg.caller));
         let res = await* _local_signTx(_txi);
         return (res);
@@ -4146,9 +4081,28 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         await* _syncTxStatus(_txi, true);
     };
-    public shared(msg) func debug_parse_tx(_data: Blob): async ETHUtils.Result_2{
+    public shared(msg) func debug_sign_and_recover_msg(_msg: Text) : async {address: Text; msgHash: Text; signature: Text; recovered: Text}{
         assert(_onlyOwner(msg.caller));
-        return await utils.parse_transaction(Blob.toArray(_data));
+        let accountId = _accountId(msg.caller, null);
+        let msgRaw = Blob.toArray(Text.encodeUtf8(_msg));
+        let msgHash = ETHCrypto.sha3(msgRaw);
+        let signature = await* _sign([accountId], msgHash);
+        var address = "";
+        let ecdsa_public_key = await ic.ecdsa_public_key({
+            canister_id = null;
+            derivation_path = [accountId];
+            key_id = { curve = #secp256k1; name = KEY_NAME };
+        });
+        switch(ETHCrypto.pubToAddress(Blob.toArray(ecdsa_public_key.public_key))){
+            case(#ok(v)){ address := v };
+            case(_){};
+        };
+        var recoveredAddress = ""; 
+        switch(ETHCrypto.recover(signature, msgRaw, msgHash, address, ck_chainId, ecContext)){
+            case(#ok(addr)){ recoveredAddress := addr };
+            case(#err(e)){ throw Error.reject(e); };
+        };
+        return {address = address; msgHash = ABI.toHex(msgHash); signature = ABI.toHex(signature); recovered = recoveredAddress};
     };
     public shared(msg) func debug_send_to(_principal: Principal, _from: EthAddress, _to: EthAddress, _amount: Wei): async TxIndex{
         assert(_onlyOwner(msg.caller));
@@ -4159,19 +4113,22 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         //ICTC:
         let saga = _getSaga();
         let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(txi))); 
-        let toid : Nat = saga.create("send_to", #Backward, ?accountId, null);
-        let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#getNonce(txi, ?[toid])), [], 0);
-        let comp1 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
-        let ttid1 = saga.push(toid, task1, ?comp1, null);
-        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx(txi)), [], 0);
-        let comp2 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#createTx_comp(txi)), [], 0);
-        let ttid2 = saga.push(toid, task2, ?comp2, null);
-        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#signTx(txi)), [], 0);
-        let comp3 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
-        let ttid3 = saga.push(toid, task3, ?comp3, null);
-        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(txi)), [], 0);
-        let comp4 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0);
-        let ttid4 = saga.push(toid, task4, ?comp4, null);
+        let toid : Nat = saga.create("debug_send_to", #Backward, ?txiBlob, null);
+        let task1 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#getNonce(txi, ?[toid])), [], 0, null, null);
+        let comp1 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0, null, null);
+        let _ttid1 = saga.push(toid, task1, ?comp1, null);
+        let task2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx(txi)), [], 0, null, null);
+        let comp2 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#createTx_comp(txi)), [], 0, null, null);
+        let _ttid2 = saga.push(toid, task2, ?comp2, null);
+        let task3 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#signTx(txi)), [], 0, null, null);
+        let comp3 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0, null, null);
+        let _ttid3 = saga.push(toid, task3, ?comp3, null);
+        let task4 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(txi)), [], 0, null, null);
+        let comp4 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0, null, null);
+        let _ttid4 = saga.push(toid, task4, ?comp4, null);
+        let task5 = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#syncTx(txi, false)), [], 0, ?txTaskAttempts, ?_txTaskInterval());
+        let comp5 = _buildTask(?txiBlob, Principal.fromActor(this), #__skip, [], 0, null, null);
+        let _ttid5 = saga.push(toid, task5, ?comp5, null);
         saga.close(toid);
         _updateTxToids(txi, [toid]);
         await* _ictcSagaRun(toid, false);
@@ -4181,31 +4138,32 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public shared(msg) func debug_verify_sign(_signer: EthAddress, _account : Account, _txHash: TxHash, _signature: [Nat8]) : async (Text, {r: [Nat8]; s: [Nat8]; v: Nat64}, EthAddress){
         assert(_onlyOwner(msg.caller));
         let message = _depositingMsg(_txHash, _account);
-        let rsv = await* ETHCrypto.convertSignature(_signature, message, _signer, ck_chainId, utils_);
-        let address = await* ETHCrypto.recover(rsv, ck_chainId, message, utils_);
+        let msgHash = ETHCrypto.sha3(message);
+        var rsv = {r: [Nat8] = []; s: [Nat8] = []; v: Nat64 = 0};
+        switch(ETHCrypto.convertSignature(_signature, message, msgHash, _signer, ck_chainId, ecContext)){
+            case(#ok(rsv_)){ rsv := rsv_ };
+            case(#err(e)){ throw Error.reject(e); };
+        };
+        var address = ""; 
+        switch(ETHCrypto.recover(_signature, message, msgHash, _signer, ck_chainId, ecContext)){
+            case(#ok(addr)){ address := addr };
+            case(#err(e)){ throw Error.reject(e); };
+        };
         return (ABI.toHex(message), rsv, address);
     };
     public shared(msg) func debug_sha3(_msg: Text): async Text{
         assert(_onlyOwner(msg.caller));
         let hex = ABI.toHex(ETHCrypto.sha3(Blob.toArray(Text.encodeUtf8(_msg))));
-        assert(hex == ABI.toHex(await utils.keccak256(Blob.toArray(Text.encodeUtf8(_msg)))));
+        // assert(hex == ABI.toHex(await utils.keccak256(Blob.toArray(Text.encodeUtf8(_msg)))));
         return hex;
     };
-    public shared(msg) func debug_updateBalance(): async (){
+    public shared(msg) func debug_updateBalance(_aid: ?AccountId): async (){
         assert(_onlyOwner(msg.caller));
-        await* _updateBalance();
+        await* _updateBalance(_aid);
     };
-    public shared(msg) func debug_updataBalanceForMode2(): async (){
+    public shared(msg) func debug_clearMethod2Txn(): async (){
         assert(_onlyOwner(msg.caller));
-        lastUpdateBalanceForMode2Time := 0;
-        lastUpdateMode2TxnTime := 0;
-        await* _updataBalanceForMode2();
-    };
-    public shared(msg) func debug_updateRetrievals(): async (){
-        assert(_onlyOwner(msg.caller));
-        lastUpdateRetrievalsTime := 0;
-        lastUpdateTxsTime := 0;
-        ignore await* _updateRetrievals();
+        await* _clearMethod2Txn();
     };
     public shared(msg) func debug_updateTokenEthRatio(): async (){
         assert(_onlyOwner(msg.caller));
@@ -4305,28 +4263,28 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public query func ictc_getTOCount() : async Nat{
         return _getSaga().count();
     };
-    public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order{
+    public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order<CustomCallType>{
         return _getSaga().getOrder(_toid);
     };
-    public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order)]; totalPage: Nat; total: Nat}{
+    public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getOrders(_page, _size);
     };
-    public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order)]{
+    public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order<CustomCallType>)]{
         return _getSaga().getAliveOrders();
     };
-    public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent{
+    public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent<CustomCallType>{
         return _getSaga().getActuator().getTaskEvent(_ttid);
     };
-    public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent]{
+    public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent<CustomCallType>]{
         return _getSaga().getTaskEvents(_toid);
     };
-    public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent)]; totalPage: Nat; total: Nat}{
+    public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getTaskEvents(_page, _size);
     };
-    public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task)]{
+    public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task<CustomCallType>)]{
         let pool = _getSaga().getActuator().getTaskPool();
-        let arr = Array.map<(SagaTM.Ttid, SagaTM.Task), (SagaTM.Ttid, SagaTM.Task)>(pool, 
-        func (item:(SagaTM.Ttid, SagaTM.Task)): (SagaTM.Ttid, SagaTM.Task){
+        let arr = Array.map<(SagaTM.Ttid, SagaTM.Task<CustomCallType>), (SagaTM.Ttid, SagaTM.Task<CustomCallType>)>(pool, 
+        func (item:(SagaTM.Ttid, SagaTM.Task<CustomCallType>)): (SagaTM.Ttid, SagaTM.Task<CustomCallType>){
             (item.0, item.1);
         });
         return arr;
@@ -4361,13 +4319,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     //     saga.close(_toid);
     //     return ttid;
     // };
-    public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
+    public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
         // Governance or manual compensation (operation allowed only when a transaction order is in blocking status).
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         assert(_onlyBlocking(_toid));
         let saga = _getSaga();
         saga.open(_toid);
-        let taskRequest = _buildTask(_businessId, _callee, _callType, _preTtids, 0);
+        let taskRequest = _buildTask(_businessId, _callee, _callType, _preTtids, 0, null, null);
         //let ttid = saga.append(_toid, taskRequest, null, null);
         let ttid = saga.appendComp(_toid, Option.get(_forTtid, 0), taskRequest, null);
         return ttid;
@@ -4477,7 +4435,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     // receive cycles
     public func wallet_receive(): async (){
         let amout = Cycles.available();
-        let accepted = Cycles.accept(amout);
+        let _accepted = Cycles.accept<system>(amout);
     };
     /// timer tick
     // public shared(msg) func timer_tick(): async (){
@@ -4509,10 +4467,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     lastGetGasPriceTime := _now();
                 }catch(e){};
             };
-            try{ await* _updataBalanceForMode2() }catch(e){};
-            try{ ignore await* _updateRetrievals() }catch(e){};
-            try{ await* _updateBalance() }catch(e){};
+            try{ await* _syncTxs() }catch(e){};
+            try{ await* _clearMethod2Txn() }catch(e){};
             try{ await* _coverPendingTxs() }catch(e){};
+            try{ await* _ictcSagaRun(0, false) }catch(e){};
             let (keeper, url, total) = _getRpcUrl(0);
             if (total < minRpcConfirmations){
                 paused := true;
@@ -4526,8 +4484,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);
         Timer.cancelTimer(timerId2);
-        timerId := Timer.recurringTimer(#seconds(_intervalSeconds1), timerLoop);
-        timerId2 := Timer.recurringTimer(#seconds(_intervalSeconds2), timerLoop2);
+        timerId := Timer.recurringTimer<system>(#seconds(_intervalSeconds1), timerLoop);
+        timerId2 := Timer.recurringTimer<system>(#seconds(_intervalSeconds2), timerLoop2);
     };
     public shared(msg) func timerStop(): async (){
         assert(_onlyOwner(msg.caller));
@@ -4547,7 +4505,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     /* ===========================
       Upgrade section
     ============================== */
-    private stable var __sagaDataNew: ?SagaTM.Data = null;
+    private stable var __sagaDataNew: ?SagaTM.Data<CustomCallType> = null;
     system func preupgrade() {
         let data = _getSaga().getData();
         __sagaDataNew := ?data;
@@ -4563,8 +4521,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
             case(_){};
         };
-        timerId := Timer.recurringTimer(#seconds(if (app_debug) {3600*2} else {1800}), timerLoop);
-        timerId2 := Timer.recurringTimer(#seconds(if (app_debug) {300} else {120}), timerLoop2);
+        timerId := Timer.recurringTimer<system>(#seconds(if (app_debug) {3600*2} else {1800}), timerLoop);
+        timerId2 := Timer.recurringTimer<system>(#seconds(if (app_debug) {300} else {120}), timerLoop2);
     };
 
     /* ===========================
@@ -4585,16 +4543,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     ///     - Query the necessary data through other query functions, and then call recovery() to restore the data.
     ///     - Abandon this solution and seek other data recovery solutions.
     
-    // type Toid = SagaTM.Toid;
-    // type Ttid = SagaTM.Ttid;
-    type Order = SagaTM.Order;
-    type Task = SagaTM.Task;
-    type SagaData = Backup.SagaData;
+    type Order<CustomCallType> = SagaTM.Order<CustomCallType>;
+    type Task<CustomCallType> = SagaTM.Task<CustomCallType>;
+    type SagaData<CustomCallType> = Backup.SagaData<CustomCallType>;
     type BackupRequest = Backup.BackupRequest;
-    type BackupResponse = Backup.BackupResponse;
+    type BackupResponse<CustomCallType> = Backup.BackupResponse<CustomCallType>;
 
     /// Backs up data of the specified `BackupRequest` classification, and the result is wrapped using the `BackupResponse` type.
-    public shared(msg) func backup(_request: BackupRequest) : async BackupResponse{
+    public shared(msg) func backup(_request: BackupRequest) : async BackupResponse<CustomCallType>{
         assert(_onlyOwner(msg.caller));
         switch(_request){
             case(#otherData){
@@ -4748,11 +4704,35 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         return (k, v);
                     }));
             };
+            case(#sagaData(mode)){
+                var data = _getSaga().getDataBase();
+                if (mode == #All){
+                    data := _getSaga().getData();
+                };
+                return #sagaData({
+                    autoClearTimeout = data.autoClearTimeout; 
+                    index = data.index; 
+                    firstIndex = data.firstIndex; 
+                    orders = data.orders; 
+                    aliveOrders = List.toArray(data.aliveOrders); 
+                    taskEvents = data.taskEvents; 
+                    actuator = {
+                        tasks = (List.toArray(data.actuator.tasks.0), List.toArray(data.actuator.tasks.1)); 
+                        taskLogs = data.actuator.taskLogs; 
+                        errorLogs = data.actuator.errorLogs; 
+                        callees = data.actuator.callees; 
+                        index = data.actuator.index; 
+                        firstIndex = data.actuator.firstIndex; 
+                        errIndex = data.actuator.errIndex; 
+                        firstErrIndex = data.actuator.firstErrIndex; 
+                    }; 
+                });
+            };
         };
     };
     
     /// Restore `BackupResponse` data to the canister's global variable.
-    public shared(msg) func recovery(_request: BackupResponse) : async Bool{
+    public shared(msg) func recovery(_request: BackupResponse<CustomCallType>) : async Bool{
         assert(_onlyOwner(msg.caller));
         switch(_request){
             case(#otherData(data)){
@@ -4882,6 +4862,26 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 for ((k, v) in data.vals()){
                     cyclesMonitor := Trie.put(cyclesMonitor, keyp(k), Principal.equal, v).0;
                 };
+            };
+            case(#sagaData(data)){
+                _getSaga().setData({
+                    autoClearTimeout = data.autoClearTimeout; 
+                    index = data.index; 
+                    firstIndex = data.firstIndex; 
+                    orders = data.orders; 
+                    aliveOrders = List.fromArray(data.aliveOrders); 
+                    taskEvents = data.taskEvents; 
+                    actuator = {
+                        tasks = (List.fromArray(data.actuator.tasks.0), List.fromArray(data.actuator.tasks.1)); 
+                        taskLogs = data.actuator.taskLogs; 
+                        errorLogs = data.actuator.errorLogs; 
+                        callees = data.actuator.callees; 
+                        index = data.actuator.index; 
+                        firstIndex = data.actuator.firstIndex; 
+                        errIndex = data.actuator.errIndex; 
+                        firstErrIndex = data.actuator.firstErrIndex; 
+                    }; 
+                });
             };
         };
         return true;

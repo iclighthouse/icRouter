@@ -45,7 +45,7 @@ module{
             method = #post;
             transform = _transform;
         };
-        Cycles.add(_addCycles);
+        Cycles.add<system>(_addCycles);
         let ic : IC.Self = actor ("aaaaa-aa");
         let response = await ic.http_request(request);
         let resBody: Blob = Blob.fromArray(response.body);

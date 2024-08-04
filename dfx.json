@@ -18,11 +18,13 @@
       },
       "icETHMinterTest": {
         "main": "./eth/src/icETHMinter.mo",
-        "type": "motoko"
+        "type": "motoko",
+        "gzip" : true
       },
-      "icETHMinterTest2": {
+      "icETHMinterTestnet": {
         "main": "./eth/src/icETHMinter.mo",
-        "type": "motoko"
+        "type": "motoko",
+        "gzip" : true
       }
     },
     "defaults": {
@@ -41,6 +43,6 @@
         "type": "ephemeral"
       }
     },
-    "dfx": "0.15.0"
+    "dfx": "0.21.0"
   }
   

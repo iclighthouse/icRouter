@@ -4,7 +4,7 @@ let upstream =
 [ { dependencies = [] : List Text
   , name = "base"
   , repo = "https://github.com/dfinity/motoko-base.git"
-  , version = "1bee37dbe5dbab1017b18ba0490b78f148196c8b"
+  , version = "6f49e5f877742b79e97ef1b6f226a7f905ba795c"
   }
 , { dependencies = [ "base" ]
   , name = "crud"
@@ -132,8 +132,31 @@ let
     , { dependencies = [ "base", "sha224" ]
       , name = "icl"
       , repo = "https://github.com/iclighthouse/icl-vessel"
-      , version = "35725bcede1f9ee47f63dccffeba51dd6d440ecd"
+      , version = "5495f3280f008b45f690c46eeb0e878854d3b17a"
+      }, { dependencies = [ "base", "icl" ]
+      , name = "ictc"
+      , repo = "https://github.com/iclighthouse/ICTC"
+      , version = "6bb091b836dbce3c990d0d08cf6d024d35d16a43"
+      }, { dependencies = [ "base" ]
+      , name = "libsecp256k1"
+      , repo = "https://github.com/av1ctor/libsecp256k1.mo"
+      , version = "e3e44347113421f8e36e9da8d8c8b4863104d6a6"
       }
+      {-
+      , { dependencies = [] : List Text
+      ,name = "testing"
+      , repo = "https://github.com/internet-computer/testing"
+      , version = "2968b359cf69d7bbef5005d8fbfbc60d56df8a88"
+      }, { dependencies = [ "base", "testing" ]
+      , name = "rlp"
+      , repo = "https://github.com/relaxed04/rlp-motoko"
+      , version = "16ee578b1315dd160718f1379a7e20c1f33c7d0d"
+      }, { dependencies = ["base", "rlp", "libsecp256k1", "sha3"]
+      , name = "evm"
+      , repo = "https://github.com/av1ctor/evm-txs.mo"
+      , version = "28cfc1b3ca8ccb238001456ce33876441aeba5a7"
+      }
+      -}
     ] : List Package
 
 let
