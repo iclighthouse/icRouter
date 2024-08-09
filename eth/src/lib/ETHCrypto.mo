@@ -37,14 +37,18 @@ module {
         return ECMult.ECMultContext(null); 
     };
 
-    private func _vTest(_signature: [Nat8], _v: Nat, _msg: [Nat8], _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<Nat64, Text>{
-        var temp = _v;
-        if (temp >= 27 and temp < 35){
-            temp -= 27;
-        }else if (temp >= _chainId * 2 + 35){
-            temp -= _chainId * 2 + 35;
+    private func _getV(_n: Nat, _chainId: ?Nat): Nat8{
+        var v = _n;
+        let chainId = Option.get(_chainId, 0);
+        if (v >= 27 and v < 35){
+            v -= 27;
+        }else if (v >= chainId * 2 + 35){
+            v -= chainId * 2 + 35;
         };
-        let v = Nat8.fromNat(temp);
+        return Nat8.fromNat(v);
+    };
+    private func _vTest(_signature: [Nat8], _v: Nat, _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<Nat64, Text>{
+        let v = _getV(_v, ?_chainId);
         switch(Signature.parse_standard(_signature)) {
             case (#ok(signatureParsed)) {
                 switch(RecoveryId.parse(v)) {
@@ -57,7 +61,7 @@ module {
                                         if (address == _signer){
                                             return #ok(Nat64.fromNat(Nat8.toNat(v))); 
                                         }else if (v < 3){
-                                            return _vTest(_signature, Nat8.toNat(v)+1, _msg, _msgHash, _signer, _chainId, _ecCtx);
+                                            return _vTest(_signature, Nat8.toNat(v)+1, _msgHash, _signer, _chainId, _ecCtx);
                                         }else{
                                             return #err("Mismatched signature or wrong v-value"); 
                                         };
@@ -73,7 +77,7 @@ module {
                         };  
                     };
                     case (#err(msg)) {
-                        return #err(debug_show msg);
+                        return #err(debug_show(msg)# ":" # Nat8.toText(v));
                     };
                 };
             };
@@ -123,9 +127,9 @@ module {
         var amount: Nat = Option.get(_value, tx.amount);
         var data: [Nat8] = [];
         if (_isERC20){
+            data := ABI.encodeErc20Transfer(to, amount);
             to := tx.tokenId;
             amount := 0;
-            data := ABI.encodeErc20Transfer(to, amount);
         };
         switch(_txType){
             case(#EIP1559){
@@ -187,17 +191,17 @@ module {
         return Blob.toArray(res.signature);
     };
 
-    public func recover(_sign: [Nat8], _msg: [Nat8], _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<Text, Text>{
+    public func recover(_sign: [Nat8], _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<Text, Text>{
         if(_msgHash.size() != 32) {
             return #err("Invalid message");
         };
         var recoveryId : Nat8 = 0;
         var signature = _sign;
         if (_sign.size() == 65){
-            recoveryId := Nat8.fromNat(ABI.toNat(ABI.toBytes32(Tools.slice(_sign, 64, null))));
+            recoveryId := _getV(Nat8.toNat(_sign[64]), ?_chainId);
             signature := Tools.slice(_sign, 0, ?63);
         }else if (_sign.size() == 64){
-            switch(_vTest(_sign, 0, _msg, _msgHash, _signer, _chainId, _ecCtx)){
+            switch(_vTest(_sign, 0, _msgHash, _signer, _chainId, _ecCtx)){
                 case(#ok(v)){
                     recoveryId := Nat8.fromNat(Nat64.toNat(v));
                 };
@@ -235,7 +239,7 @@ module {
         };
     };
 
-    public func convertSignature(_sign: [Nat8], _msg: [Nat8], _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<{r: [Nat8]; s: [Nat8]; v: Nat64}, Text>{
+    public func convertSignature(_sign: [Nat8], _msgHash: [Nat8], _signer: EthAddress, _chainId: Nat, _ecCtx: ECMult.ECMultContext) : Result.Result<{r: [Nat8]; s: [Nat8]; v: Nat64}, Text>{
         if (_sign.size() < 64){
             return #err("Invalid signature.");
         };
@@ -243,9 +247,9 @@ module {
         let s = Tools.slice(_sign, 32, ?63);
         var v : Nat64 = 0;
         if (_sign.size() == 65){
-            v := Nat64.fromNat(ABI.toNat(ABI.toBytes32(Tools.slice(_sign, 64, null))));
+            v := Nat64.fromNat(Nat8.toNat(_getV(Nat8.toNat(_sign[64]), ?_chainId)));
         }else{
-            switch(_vTest(_sign, 0, _msg, _msgHash, _signer, _chainId, _ecCtx)){
+            switch(_vTest(_sign, 0, _msgHash, _signer, _chainId, _ecCtx)){
                 case(#ok(v_)){
                     v := v_;
                 };

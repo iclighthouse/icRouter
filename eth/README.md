@@ -59,12 +59,6 @@ retrieve: (_token: opt EthAddress, _address: EthAddress, _amount: Wei, _subaccou
 });
 ```
 
-## Roadmap
-
-- icETH Minting and Retrieval (done)
-- icERC20 Minting and Retrieval (done)
-- Decentralization with multiple RPC API providers (done)
-
 ## Demo
 
 http://iclight.io

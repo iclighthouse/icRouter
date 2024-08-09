@@ -15,8 +15,4 @@ The project will implement the following features:
 - Bitcoin (BTC) <> IC - (doing)
 - Ethereum (ETH/ERC20) <> IC - (doing)
 - IC (ICP/ICRC1) <> Ethereum
-- BNB Chain (BNB/BEP20) <> IC
-- Polygon (MATIC/ERC20) <> IC
-- Optimism (OP/ERC20) <> IC
-- Arbitrum (ARB/ERC20) <> IC
-- Any Network <> Any Network
+- Other Network <> IC

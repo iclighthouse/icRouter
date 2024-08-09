@@ -270,6 +270,7 @@ type CustomCallType = variant {
   sendTx : TxIndex__2;
   createTx_comp : TxIndex__2;
   signTx : TxIndex__2;
+  burnNotify : record { TxIndex__2; Wei__1; BlockHeight__1 };
   validateTx : TxHash__1;
   syncTx : record { TxIndex__2; bool };
   getNonce : record { TxIndex__2; opt vec nat };
@@ -796,7 +797,14 @@ type Order__1 = record {
   compStrategy : CompStrategy;
   allowPushing : variant { Opening; Closed };
 };
-type PendingDepositTxn = record { TxHash; Account__2; blob; bool; Timestamp };
+type PendingDepositTxn = record {
+  TxHash;
+  Account__2;
+  blob;
+  bool;
+  Timestamp;
+  opt nat;
+};
 type PubKey = blob;
 type Receipt = variant {
   result : opt Return;
