@@ -544,13 +544,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ignore _putEvent(#send({toid = ?toid; to = to; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?toAccountId);
         return toid;
     };
-    private func _mintCkToken(account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
+    private func _mintCkToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
         // mint ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
         let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
         let saga = _getSaga();
-        let toid : Nat = saga.create(Option.get(ictcName, "mint"), #Forward, ?accountId, null);
+        var toid : Nat = 0;
+        switch(optToid){
+            case(?toid_){
+                toid := toid_;
+                saga.open(toid);
+            };
+            case(_){
+                toid := saga.create(Option.get(ictcName, "mint"), #Forward, ?accountId, null);
+            };
+        };
         let args : ICRC1.TransferArgs = {
             from_subaccount = null;
             to = icrc1Account;
@@ -565,13 +574,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ignore _putEvent(#mint({toid = ?toid; account = account; address = userAddress; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
-    private func _burnCkToken(fromSubaccount: Blob, address: Text, amount: Nat64, account: Account) : SagaTM.Toid{
+    private func _burnCkToken(optToid: ?Nat, fromSubaccount: Blob, address: Text, amount: Nat64, account: Account, ictcName: ?Text) : SagaTM.Toid{
         // burn ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
         let saga = _getSaga();
-        let toid : Nat = saga.create("burn", #Forward, ?accountId, null);
+        var toid : Nat = 0;
+        switch(optToid){
+            case(?toid_){
+                toid := toid_;
+                saga.open(toid);
+            };
+            case(_){
+                toid := saga.create(Option.get(ictcName, "burn"), #Forward, ?accountId, null);
+            };
+        };
         let burnArgs : ICRC1.TransferArgs = {
             from_subaccount = ?fromSubaccount;
             to = mainIcrc1Account;
@@ -586,7 +604,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ignore _putEvent(#burn({toid = ?toid; account = account; address = address; icTokenCanisterId = ckTokenCanisterId; tokenBlockIndex = 0; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
-    private func _burnCkToken2(_fromSubaccount: Blob, _address: Text, _amount: Nat64, _account: Account) : async* { #Ok: Nat; #Err: ICRC1.TransferError; }{
+    private func _burnCkTokenWithoutIctc(_fromSubaccount: Blob, _address: Text, _amount: Nat64, _account: Account) : async* { #Ok: Nat; #Err: ICRC1.TransferError; }{
         ignore await* _getSaga().getActuator().run();
         let accountId = _accountId(_account.owner, _account.subaccount);
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
@@ -831,7 +849,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                     // burn Fee
                     _subFeeBalance(Nat64.fromNat(totalFee));
                     let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                    ignore _burnCkToken(Blob.fromArray(sa_one), "", Nat64.fromNat(totalFee), feetoAccount);
+                    ignore _burnCkToken(?toid, Blob.fromArray(sa_one), "", Nat64.fromNat(totalFee), feetoAccount, ?"burn_fee");
                     // ictc: signs / build - send
                     let task = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#buildTx(txi)), [], 0, null, null);
                     let _ttid = saga.push(toid, task, null, null);
@@ -879,7 +897,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                             let burningFee = Nat64.sub(Nat64.fromNat(totalFee), tx.fee);
                             _subFeeBalance(burningFee);
                             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                            ignore _burnCkToken(Blob.fromArray(sa_one), "", burningFee, feetoAccount);
+                            ignore _burnCkToken(?toid, Blob.fromArray(sa_one), "", burningFee, feetoAccount, ?"burn_fee");
                         };
                         // ictc: signs / build - send
                         let task = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#buildTx(txi)), [], 0, null, null);
@@ -1192,12 +1210,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             let fixedFee = Nat64.fromNat(ckFixedFee);
             let value = Nat64.sub(amount, fixedFee);
             let saga = _getSaga();
-            let toid = _mintCkToken(account, ownAddress, value, null);
+            let toid = _mintCkToken(null, account, ownAddress, value, null);
             // mint Fee 
             _addFeeBalance(fixedFee);
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
             if (fixedFee > 0){
-                ignore _mintCkToken(feetoAccount, "", fixedFee, ?"mint_fee");
+                ignore _mintCkToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
             };
             totalBtcFee += fixedFee;
             totalBtcReceiving += value;
@@ -1290,7 +1308,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             return #Err(#TemporarilyUnavailable("Please try again later as some BTC balance of the smart contract is in unconfirmed status."));
         };
         //burn
-        switch(await* _burnCkToken2(accountId, args.address, args.amount, account)){
+        switch(await* _burnCkTokenWithoutIctc(accountId, args.address, args.amount, account)){
             case(#Ok(height)){
                 let value = Nat64.sub(args.amount, fee); // Satoshi
                 totalBtcFee += fee;
@@ -1307,7 +1325,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                 // mint Fee
                 _addFeeBalance(fee);
                 let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                ignore _mintCkToken(feetoAccount, "", fee, ?"mint_fee");
+                let toid = _mintCkToken(null, feetoAccount, "", fee, ?"mint_fee");
                 // record event
                 let event : Minter.Event = #accepted_retrieve_btc_request({
                     txi = thisTxIndex;
@@ -1549,7 +1567,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply += value;
             ckFeetoBalance += value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintCkToken(feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
+            ignore _mintCkToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
         }else if (ckTotalSupply > nativeBalance){
             var value = Nat.sub(ckTotalSupply, nativeBalance);
             if (value > ckFeetoBalance){ 
@@ -1559,7 +1577,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply -= value;
             ckFeetoBalance -= value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _burnCkToken(Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount);
+            ignore _burnCkToken(null, Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount, ?"burn_rebalance");
         };
         feeBalance := Nat64.fromNat(ckFeetoBalance);
         let postBalance = {nativeBalance = nativeBalance; totalSupply = ckTotalSupply; minterBalance = minterBalance; feeBalance = ckFeetoBalance};
