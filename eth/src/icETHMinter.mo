@@ -621,7 +621,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     }; 
     private func _local_burnNotify(_ethAddress: EthAddress, _amount: Wei, _height: BlockHeight) : async* {token: EthAddress; amount: Wei}{
-        // do nothing
+        // do nothing. (This is a pre-defined notification callback function to prepare for extensibility.)
         return {token = _ethAddress; amount = _amount };
     };
     
