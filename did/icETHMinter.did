@@ -270,7 +270,7 @@ type CustomCallType = variant {
   sendTx : TxIndex__2;
   createTx_comp : TxIndex__2;
   signTx : TxIndex__2;
-  burnNotify : record { TxIndex__2; Wei__1; BlockHeight__1 };
+  burnNotify : record { EthAddress; Wei__1; BlockHeight__1 };
   validateTx : TxHash__1;
   syncTx : record { TxIndex__2; bool };
   getNonce : record { TxIndex__2; opt vec nat };
