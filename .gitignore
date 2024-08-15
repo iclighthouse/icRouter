@@ -2,4 +2,5 @@
 .idea
 .dfx
 .vessel
-/Docs/*
+*--*
+canister_ids.json

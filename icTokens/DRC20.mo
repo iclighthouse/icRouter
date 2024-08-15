@@ -3,6 +3,7 @@
                 Modified from this version (https://github.com/iclighthouse/DRC_standards/tree/main/DRC20)
  * Author     : ICLighthouse Team
  * License    : Apache License 2.0
+ * Version    : 1.0.0
  * Stability  : Experimental
  * Github     : https://github.com/iclighthouse/icRouter
  */
@@ -20,17 +21,13 @@ import Nat64 "mo:base/Nat64";
 import Int "mo:base/Int";
 import Int32 "mo:base/Int32";
 import Iter "mo:base/Iter";
-import List "mo:base/List";
 import Time "mo:base/Time";
-import Deque "mo:base/Deque";
 import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
 import Types "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
 import AID "mo:icl/AID";
 import Hex "mo:icl/Hex";
-import Binary "mo:icl/Binary";
-import SHA224 "mo:sha224/SHA224";
 import DRC202 "mo:icl/DRC202";
 import ICPubSub "mo:icl/ICPubSub";
 import DIP20 "mo:icl/DIP20";
@@ -74,16 +71,15 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     * Config 
     */
     private stable var FEE_TO: AccountId = AID.blackhole(); 
-    private stable var NonceStartBase: Nat = 10000000;
+    private stable var NonceStartBase: Nat = 10_000_000;
     private stable var NonceMode: Nat = 0; // Nonce mode is turned on when there is not enough storage space or when the nonce value of a single user exceeds `NonceStartBase`.
     private stable var AllowanceLimit: Nat = 50;
-    private let MAX_MEMORY: Nat = 2*1000*1000*1000; // 2G
+    private let MAX_MEMORY: Nat = 2 * 1_000 * 1_000 * 1_000; // 2G
 
     /* 
     * State Variables 
     */
     private var standard_: Text = "drc20; icrc1; icrc2; dip20; ictokens"; 
-    private stable var owner: Principal = installMsg.caller;  // @deprecated
     private stable var name_: Text = Option.get(initArgs.name, "");
     private stable var symbol_: Text = Option.get(initArgs.symbol, "");
     private stable let decimals_: Nat8 = initArgs.decimals;
@@ -99,7 +95,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     private stable var allowances: Trie.Trie2D<AccountId, AccountId, Nat> = Trie.empty(); // Limit 50 records per account
     // private stable var cyclesBalances: Trie.Trie<AccountId, Nat> = Trie.empty();
     // Set EN_DEBUG=false in the production environment.
-    private var drc202 = DRC202.DRC202({EN_DEBUG = enDebug; MAX_CACHE_TIME = 3 * 30 * 24 * 3600 * 1000000000; MAX_CACHE_NUMBER_PER = 200; MAX_STORAGE_TRIES = 2; }, standard_);
+    private var drc202 = DRC202.DRC202({EN_DEBUG = enDebug; MAX_CACHE_TIME = 3 * 30 * 24 * 3_600 * 1_000_000_000; MAX_CACHE_NUMBER_PER = 200; MAX_STORAGE_TRIES = 2; }, standard_);
     private stable var drc202_lastStorageTime : Time.Time = 0;
     private var pubsub = ICPubSub.ICPubSub<MsgType>({ MAX_PUBLICATION_TRIES = 2 }, func (t1:MsgType, t2:MsgType): Bool{ t1 == t2 });
     private stable var icps_lastPublishTime : Time.Time = 0;
@@ -126,22 +122,21 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     * ck
     */
     private stable var minters: [Principal] = []; // [owner]  //ck
-    private func _onlyMiner(_caller: Principal) : Bool { //ck
+    private func _onlyMinter(_caller: Principal) : Bool { //ck
         return Option.isSome(Array.find(minters, func (t: Principal): Bool{ t == _caller }));
     };
     
     /* 
     * For storage saving mode
     */
-    private stable var dropedAccounts: Trie.Trie<Blob, Bool> = Trie.empty(); // @deprecated
     private stable var droppedAccounts: Trie.Trie<Blob, Bool> = Trie.empty(); 
     private func _checkNonceMode(_upgrade: Bool) : (){
         if (NonceMode == 0 and (_upgrade or Prim.rts_memory_size() > MAX_MEMORY)){
             NonceMode := 1;
-            if (drc202.getConfig().MAX_CACHE_TIME > 30 * 24 * 3600 * 1000000000){
+            if (drc202.getConfig().MAX_CACHE_TIME > 30 * 24 * 3_600 * 1_000_000_000){
                 ignore drc202.config({ // Records cache for 30 days
                     EN_DEBUG = null;
-                    MAX_CACHE_TIME = ?(30 * 24 * 3600 * 1000000000);
+                    MAX_CACHE_TIME = ?(30 * 24 * 3_600 * 1_000_000_000);
                     MAX_CACHE_NUMBER_PER = null;
                     MAX_STORAGE_TRIES = null;
                 });
@@ -156,6 +151,14 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             nonces := Trie.empty();
             droppedAccounts := Trie.empty(); 
             firstTime := Trie.empty();
+            let snapshotLen = balancesSnapshot.size();
+            if (snapshotLen > 2){
+                balancesSnapshot := [balancesSnapshot[Nat.sub(snapshotLen, 2)], balancesSnapshot[Nat.sub(snapshotLen, 1)]];
+            };
+            if (NonceMode > 3 and Trie.size(allowances) > 10_000){ 
+                allowances := Trie.empty(); 
+                allowanceExpirations := Trie.empty(); 
+            };
         };
     };
     private func _checkAllowanceLimit(_a: AccountId) : Bool{
@@ -173,7 +176,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             case(_){ return false; };
         };
     };
-    private func _dropAccount(_a: AccountId) : Bool{ // (*)
+    private func _dropAccount(_a: AccountId) : Bool{ 
         let minValue = fee_;
         if (_getBalance(_a) > minValue or (_getNonce(_a) == 0 and _getBalance(_a) == 0)){
             return false;
@@ -237,7 +240,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let now = Time.now();
         if (NonceMode == 0){
             let coinSecondsItem = Option.get(Trie.get(coinSeconds, keyb(_a), Blob.equal), {coinSeconds = 0; updateTime = now });
-            let newCoinSeconds = coinSecondsItem.coinSeconds + originalValue * (Int.abs(now - coinSecondsItem.updateTime) / 1000000000);
+            let newCoinSeconds = coinSecondsItem.coinSeconds + originalValue * (Int.abs(now - coinSecondsItem.updateTime) / 1_000_000_000);
             coinSeconds := Trie.put(coinSeconds, keyb(_a), Blob.equal, {coinSeconds = newCoinSeconds; updateTime = now}).0;
         };
         if(_v == 0){
@@ -383,7 +386,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         _setBalance(_to, balance_to);
         if (NonceMode == 0){
             totalCoinSeconds := {
-                coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(Time.now() - totalCoinSeconds.updateTime) / 1000000000); 
+                coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(Time.now() - totalCoinSeconds.updateTime) / 1_000_000_000); 
                 updateTime = Time.now();
             };
         };
@@ -398,7 +401,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
                 _setBalance(_from, balance_from);
                 if (NonceMode == 0){
                     totalCoinSeconds := {
-                        coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(Time.now() - totalCoinSeconds.updateTime) / 1000000000); 
+                        coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(Time.now() - totalCoinSeconds.updateTime) / 1_000_000_000); 
                         updateTime = Time.now();
                     };
                 };
@@ -432,7 +435,6 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     private func _transfer(_msgCaller: Principal, _sa: ?[Nat8], _from: AccountId, _to: AccountId, _value: Nat, _nonce: ?Nat, _data: ?Blob, 
     _operation: Operation, _isAllowance: Bool): (result: TxnResult) {
         _checkNonceMode(false);
-        var callerPrincipal = _msgCaller;
         let caller = _getAccountIdFromPrincipal(_msgCaller, _sa);
         let txid = _getTxid(caller);
         let from = _from;
@@ -440,7 +442,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let value = _value; 
         var gas: Gas = #token(fee_);
         var allowed: Nat = 0; // *
-        var spendValue = _value; // *
+        var spendValue = _value + fee_; // *
         if (_isAllowance){
             allowed := _getAllowance(from, caller);
         };
@@ -467,7 +469,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         };
         var txn: TxnRecord = {
             txid = txid;
-            msgCaller = null; // If you want to maintain anonymity, you can hide the principal of the caller
+            msgCaller = null; 
             caller = caller;
             timestamp = Time.now();
             index = index;
@@ -525,7 +527,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
                 };
             };
             case(#lockTransfer(operation)){
-                spendValue := operation.locked;
+                spendValue := operation.locked + fee_;
                 if (not(_lock(from, operation.locked, true))){
                     return #err({ code=#InsufficientBalance; message="Insufficient Balance"; });
                 } else if (_isAllowance and (allowed < spendValue or allowed == 0)){
@@ -590,13 +592,13 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             return ({ coinSeconds = 0; updateTime = 0; }, null);
         };
         let now = Time.now();
-        let newTotalCoinSeconds = { coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(now - totalCoinSeconds.updateTime) / 1000000000); updateTime = now; };
+        let newTotalCoinSeconds = { coinSeconds = totalCoinSeconds.coinSeconds + totalSupply_ * (Int.abs(now - totalCoinSeconds.updateTime) / 1_000_000_000); updateTime = now; };
         switch(_owner){
             case(?(owner)){ 
                 let account = _getAccountId(owner);
                 switch(Trie.get(coinSeconds, keyb(account), Blob.equal)){
                     case(?(coinSecondsItem)){
-                        let newAccountCoinSeconds = { coinSeconds = coinSecondsItem.coinSeconds + _getBalance(account) * (Int.abs(now - coinSecondsItem.updateTime) / 1000000000); updateTime = now; };
+                        let newAccountCoinSeconds = { coinSeconds = coinSecondsItem.coinSeconds + _getBalance(account) * (Int.abs(now - coinSecondsItem.updateTime) / 1_000_000_000); updateTime = now; };
                         return (newTotalCoinSeconds, ?newAccountCoinSeconds);
                     };
                     case(_){ return (newTotalCoinSeconds, null); };
@@ -634,7 +636,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         };
         let operation: Operation = #lockTransfer({ 
             locked = _value;  // be locked for the amount
-            expiration = Time.now() + Int32.toInt(Int32.fromNat32(_timeout)) * 1000000000;  
+            expiration = Time.now() + Int32.toInt(Int32.fromNat32(_timeout)) * 1_000_000_000;  
             decider = decider;
         });
         let from = _from;
@@ -737,6 +739,9 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let from = _getAccountIdFromPrincipal(__caller, _sa);
         let to = _getAccountId(_spender);
         let operation: Operation = #approve({ allowance = _value; });
+        if (_value >= 2 ** 128){
+            return #err({ code=#UndefinedError; message="The value is too big."; });
+        };
         if (not(_checkAllowanceLimit(from))){
             return #err({ code=#UndefinedError; message="The number of allowance records exceeds the limit"; });
         };
@@ -903,12 +908,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         // dip20 does not support account-id, sub-account, nonce, attached data
         let res = __transferFrom(msg.caller, _from, _to, value, null, null, null, false);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -920,12 +925,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         // dip20 does not support account-id, sub-account, nonce, attached data
         let res = __transferFrom(msg.caller, _from, _to, value, null, null, null, true);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -935,12 +940,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         // dip20 does not support account-id, sub-account, nonce, attached data
         let res = __approve(msg.caller, Principal.toText(spender), value, null, null, null);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1047,12 +1052,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     public shared(msg) func drc20_transfer(_to: To, _value: Amount, _nonce: ?Nonce, _sa: ?Sa, _data: ?Data) : async (result: TxnResult) {
         let res = __transferFrom(msg.caller, _getAccountIdFromPrincipal(msg.caller, _sa), _getAccountId(_to), _value, _nonce, _sa, _data, false);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1076,12 +1081,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             i += 1;
         };
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1091,12 +1096,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     async (result: TxnResult) {
         let res = __transferFrom(msg.caller, _getAccountId(_from), _getAccountId(_to), _value, _nonce, _sa, _data, true);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1106,12 +1111,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     _decider: ?Decider, _nonce: ?Nonce, _sa: ?Sa, _data: ?Data) : async (result: TxnResult) {
         let res = __lockTransferFrom(msg.caller, _getAccountIdFromPrincipal(msg.caller, _sa), _getAccountId(_to), _value, _timeout, _decider, _nonce, _sa, _data, false);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1121,12 +1126,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     _timeout: Timeout, _decider: ?Decider, _nonce: ?Nonce, _sa: ?Sa, _data: ?Data) : async (result: TxnResult) {
         let res = __lockTransferFrom(msg.caller, _getAccountId(_from), _getAccountId(_to), _value, _timeout, _decider, _nonce, _sa, _data, true);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1135,12 +1140,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     public shared(msg) func drc20_executeTransfer(_txid: Txid, _executeType: ExecuteType, _to: ?To, _nonce: ?Nonce, _sa: ?Sa, _data: ?Data) : async (result: TxnResult) {
         let res = __executeTransfer(msg.caller, _txid, _executeType, _to, _nonce, _sa, _data);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1166,12 +1171,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     public shared(msg) func drc20_approve(_spender: Spender, _value: Amount, _nonce: ?Nonce, _sa: ?Sa, _data: ?Data) : async (result: TxnResult){
         let res = __approve(msg.caller, _spender, _value, _nonce, _sa, _data);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1315,7 +1320,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     public shared(msg) func icrc1_transfer(_args: TransferArgs) : async ({ #Ok: Nat; #Err: TransferError; }) { //ck
         switch(_args.fee){
             case(?(icrc1_fee)){
-                if (icrc1_fee < fee_ and not(_onlyMiner(msg.caller))){ return #Err(#BadFee({ expected_fee = fee_ })) };
+                if (icrc1_fee < fee_ and not(_onlyMinter(msg.caller))){ return #Err(#BadFee({ expected_fee = fee_ })) };
             };
             case(_){};
         };
@@ -1325,10 +1330,8 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         let value = _args.amount;
         let data = _args.memo;
         var res: TxnResult = #ok(Blob.fromArray([]));
-        if (_onlyMiner(msg.caller) and to == _getAccountIdFromPrincipal(msg.caller, null)){ // burn
+        if (_onlyMinter(msg.caller) and to == _getAccountIdFromPrincipal(msg.caller, null)){ // burn
             let operation: Operation = #transfer({ action = #burn; });
-            let balance = _getBalance(from);
-            var gasToken = fee_;
             if(not(_checkFee(from, 0, value))){
                 res := #err({ code=#InsufficientBalance; message="Insufficient Balance"; });
             }else{
@@ -1338,7 +1341,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
                 //     case(#err(v)){};
                 // };
             };
-        }else if (_onlyMiner(msg.caller) and _args.from_subaccount == null){ // mint
+        }else if (_onlyMinter(msg.caller) and _args.from_subaccount == null){ // mint
             let operation: Operation = #transfer({ action = #mint; });
             res := _transfer(msg.caller, sub, from, to, value, null, data, operation, false);
         }else{ // transfer
@@ -1349,12 +1352,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             res := __transferFrom(msg.caller, from, to, value, null, sub, data, false);
         };
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1476,12 +1479,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
             case(_, _){};
         };
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1505,12 +1508,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         };
         let res = __transferFrom(msg.caller, from, to, value, null, _toSaNat8(_args.spender_subaccount), data, true);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1619,7 +1622,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         return minters;
     };
     public shared(msg) func ictokens_mint(_to: Address, _value: Amount, _nonce: ?Nonce, _data: ?Data) : async (result: TxnResult) { //ck
-        assert(_onlyMiner(msg.caller));
+        assert(_onlyMinter(msg.caller));
         assert(_validateMaxSupply(_value));
         let from = AID.blackhole();
         let to = _getAccountId(_to);
@@ -1627,12 +1630,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         // transfer
         let res = _transfer(msg.caller, null, from, to, _value, _nonce, _data, operation, false);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1652,12 +1655,12 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         // transfer
         let res = _transfer(msg.caller, _sa, from, to, _value, _nonce, _data, operation, false);
         // publish
-        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1000000000){
+        if (pubsub.threads() == 0 or Time.now() > icps_lastPublishTime + 60*1_000_000_000){
             icps_lastPublishTime := Time.now();
             ignore pubsub.pub();
         };
         // Store data to the DRC202 scalable bucket, requires a 20 second interval to initiate a batch store, and may be rejected if you store frequently.
-        if (Time.now() > drc202_lastStorageTime + 20*1000000000) { 
+        if (Time.now() > drc202_lastStorageTime + 20*1_000_000_000) { 
             drc202_lastStorageTime := Time.now();
             ignore drc202.store(); 
         };
@@ -1768,7 +1771,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     /// receive cycles
     public func wallet_receive(): async (){
         let amout = Cycles.available();
-        let accepted = Cycles.accept(amout);
+        let _accepted = Cycles.accept<system>(amout);
     };
     /// timer tick
     // public func timer_tick(): async (){
@@ -1776,9 +1779,7 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
     // };
 
     // upgrade (Compatible with the previous version)
-    private stable var __drc202Data: [DRC202.DataTemp] = []; // @deprecated
     private stable var __drc202DataNew: ?DRC202.DataTemp = null;
-    private stable var __pubsubData: [ICPubSub.DataTemp<MsgType>] = []; // @deprecated
     private stable var __pubsubDataNew: ?ICPubSub.DataTemp<MsgType> = null;
     system func preupgrade() {
         __drc202DataNew := ?drc202.getData();
@@ -1788,31 +1789,16 @@ shared(installMsg) actor class DRC20(initArgs: Types.InitArgs, enDebug: Bool) = 
         switch(__drc202DataNew){
             case(?(data)){
                 drc202.setData(data);
-                __drc202Data := [];
                 __drc202DataNew := null;
             };
-            case(_){
-                if (__drc202Data.size() > 0){
-                    drc202.setData(__drc202Data[0]);
-                    __drc202Data := [];
-                };
-            };
+            case(_){};
         };
         switch(__pubsubDataNew){
             case(?(data)){
                 pubsub.setData(data);
-                __pubsubData := [];
                 __pubsubDataNew := null;
             };
-            case(_){
-                if (__pubsubData.size() > 0){
-                    pubsub.setData(__pubsubData[0]);
-                    __pubsubData := [];
-                };
-            };
-        };
-        if (Trie.size(droppedAccounts) == 0 and NonceMode == 0){
-            droppedAccounts := dropedAccounts;
+            case(_){};
         };
     };
 

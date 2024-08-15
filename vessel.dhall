@@ -1,4 +1,4 @@
 {
-  dependencies = [ "base", "sha224", "icl", "sha3", "json" ],
+  dependencies = [ "base", "icl", "sha3", "json", "ictc", "libsecp256k1" ],
   compiler = None Text
 }

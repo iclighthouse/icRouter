@@ -59,12 +59,6 @@ retrieve: (_token: opt EthAddress, _address: EthAddress, _amount: Wei, _subaccou
 });
 ```
 
-## Roadmap
-
-- icETH Minting and Retrieval (done)
-- icERC20 Minting and Retrieval (done)
-- Decentralization with multiple RPC API providers (done)
-
 ## Demo
 
 http://iclight.io
@@ -72,5 +66,5 @@ http://iclight.io
 ## Related technologies used
 
 - Threshold ECDSA https://github.com/dfinity/examples/tree/master/motoko/threshold-ecdsa
-- EVM Utils https://github.com/icopen/evm_utils_ic
+- libsecp256k1 https://github.com/av1ctor/libsecp256k1.mo
 

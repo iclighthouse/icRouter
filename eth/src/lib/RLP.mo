@@ -190,7 +190,7 @@ module {
   /** Decode an input with RLP */
   private func _decode(input: Uint8Array): Decoded {
     
-    var decoded = [];
+    // var decoded = [];
     var firstByte = input.get(0);
 
     // a single byte whose value is in the [0x00, 0x7f] range, that byte is its own RLP encoding.

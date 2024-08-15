@@ -1,0 +1,1548 @@
+type AccessList = record { storage_keys : vec blob; address : blob };
+type Account = record { owner : principal; subaccount : opt blob };
+type AccountId = blob;
+type AccountId__1 = blob;
+type AccountId__2 = blob;
+type AccountId__3 = blob;
+type Account__1 = record { owner : principal; subaccount : opt blob };
+type Account__2 = record { owner : principal; subaccount : opt blob };
+type Account__3 = record { owner : principal; subaccount : opt Subaccount };
+type Account__4 = record { owner : principal; subaccount : opt blob };
+type Address = text;
+type Address__1 = text;
+type Amount = nat;
+type ApproveArgs = record {
+  fee : opt nat;
+  memo : opt blob;
+  from_subaccount : opt blob;
+  created_at_time : opt nat64;
+  amount : nat;
+  expected_allowance : opt nat;
+  expires_at : opt nat64;
+  spender : Account__3;
+};
+type ApproveError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  AllowanceChanged : record { current_allowance : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  Expired : record { ledger_time : nat64 };
+  InsufficientFunds : record { balance : nat };
+};
+type Attempts = nat;
+type BackupRequest = variant {
+  ck_rpcProviders;
+  blockEvents;
+  ck_rpcLogs;
+  feeBalances;
+  pendingRetrievals;
+  kyt_txAccounts;
+  cyclesMonitor;
+  kyt_accountAddresses;
+  ck_rpcRequests;
+  kyt_addressAccounts;
+  otherData;
+  icrc1WasmHistory;
+  accounts;
+  tokens;
+  withdrawals;
+  pendingDepositTxns;
+  sagaData : variant { All; Base };
+  accountEvents;
+  retrievals;
+  deposits;
+  transactions;
+  depositTxns;
+  ck_keepers;
+  balances;
+};
+type BackupResponse = variant {
+  ck_rpcProviders : vec record { AccountId; RpcProvider };
+  blockEvents : vec record { BlockHeight; record { Event; Timestamp__1 } };
+  ck_rpcLogs : vec record { RpcId; RpcLog };
+  feeBalances : vec record { EthTokenId; Wei__2 };
+  pendingRetrievals : vec TxIndex__1;
+  kyt_txAccounts : vec record {
+    HashId;
+    vec record { ChainAccount; ICAccount };
+  };
+  cyclesMonitor : vec record { principal; nat };
+  kyt_accountAddresses : vec record { AccountId; vec ChainAccount };
+  ck_rpcRequests : vec record { RpcRequestId; RpcRequestConsensus };
+  kyt_addressAccounts : vec record { Address; vec ICAccount };
+  otherData : record {
+    txIndex : TxIndex__1;
+    firstRpcId : RpcId;
+    countRetrieval : nat;
+    ck_ethBlockNumber : record { BlockHeight; Timestamp__1 };
+    totalRetrieval : Wei__2;
+    ck_chainId : nat;
+    blockIndex : BlockHeight;
+    ck_gasPrice : Wei__2;
+    rpcRequestId : RpcRequestId;
+    firstBlockIndex : BlockHeight;
+    firstRpcRequestId : RpcRequestId;
+    countMinting : nat;
+    rpcId : RpcId;
+    quoteToken : text;
+    totalMinting : Wei__2;
+    ictc_admins : vec principal;
+  };
+  icrc1WasmHistory : vec record { blob; text };
+  accounts : vec record { AccountId; record { EthAddress__2; Nonce__1 } };
+  tokens : vec record { EthAddress__2; TokenInfo__1 };
+  withdrawals : vec record { AccountId; vec TxIndex__1 };
+  pendingDepositTxns : vec record { TxHashId; PendingDepositTxn };
+  sagaData : SagaData;
+  accountEvents : vec record { AccountId; vec BlockHeight };
+  retrievals : vec record { TxIndex__1; RetrieveStatus };
+  deposits : vec record { AccountId; TxIndex__1 };
+  transactions : vec record {
+    TxIndex__1;
+    record { TxStatus; Timestamp__1; opt Timestamp__1 };
+  };
+  depositTxns : vec record { TxHashId; record { DepositTxn; Timestamp__1 } };
+  ck_keepers : vec record { AccountId; Keeper };
+  balances : vec record {
+    AccountId;
+    vec record { EthTokenId; record { Account__1; Wei__2 } };
+  };
+};
+type BalanceStats = record {
+  feeBalance : Wei;
+  totalSupply : Wei;
+  minterBalance : Wei;
+  nativeBalance : Wei;
+};
+type BlobFill = variant { AutoFill; ManualFill : blob };
+type BlockHeight = nat;
+type BlockHeight__1 = nat;
+type BlockHeight__2 = nat;
+type CallType = variant {
+  __block;
+  ICRC1 : variant { icrc1_transfer : TransferArgs };
+  ICRC2 : variant {
+    icrc2_approve : ApproveArgs;
+    icrc2_transfer_from : TransferFromArgs;
+  };
+  custom : CustomCallType;
+  DRC20 : variant {
+    drc20_transferBatch : record {
+      vec To;
+      vec Amount;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_approve : record { Spender; Amount; opt Nonce__3; opt Sa; opt Data };
+    drc20_transferFrom : record {
+      From;
+      To;
+      Amount;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_lockTransferFrom : record {
+      From;
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_dropAccount : opt Sa;
+    drc20_lockTransfer : record {
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_transfer : record { To; Amount; opt Nonce__3; opt Sa; opt Data };
+    drc20_executeTransfer : record {
+      BlobFill;
+      ExecuteType;
+      opt To;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+  };
+  __skip;
+};
+type CallType__1 = variant {
+  __block;
+  ICRC1 : variant { icrc1_transfer : TransferArgs };
+  ICRC2 : variant {
+    icrc2_approve : ApproveArgs;
+    icrc2_transfer_from : TransferFromArgs;
+  };
+  custom : CustomCallType;
+  DRC20 : variant {
+    drc20_transferBatch : record {
+      vec To;
+      vec Amount;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_approve : record { Spender; Amount; opt Nonce__3; opt Sa; opt Data };
+    drc20_transferFrom : record {
+      From;
+      To;
+      Amount;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_lockTransferFrom : record {
+      From;
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_dropAccount : opt Sa;
+    drc20_lockTransfer : record {
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+    drc20_transfer : record { To; Amount; opt Nonce__3; opt Sa; opt Data };
+    drc20_executeTransfer : record {
+      BlobFill;
+      ExecuteType;
+      opt To;
+      opt Nonce__3;
+      opt Sa;
+      opt Data;
+    };
+  };
+  __skip;
+};
+type Callee = principal;
+type CalleeStatus = record {
+  continuousFailure : nat;
+  successCount : nat;
+  failureCount : nat;
+};
+type Callee__1 = principal;
+type Chain = text;
+type ChainAccount = record { Chain; TokenId; Address };
+type ChainAccount__1 = record { Chain__1; TokenId__1; Address__1 };
+type Chain__1 = text;
+type CompStrategy = variant { Backward; Forward };
+type CompTask = record {
+  status : Status__3;
+  comp : Compensation;
+  tcid : Tcid;
+  forTtid : Ttid__2;
+};
+type Compensation = record {
+  preTtid : vec Ttid;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee__1;
+  forTtid : opt Ttid;
+};
+type CustomCallType = variant {
+  createTx : TxIndex__2;
+  sendTx : TxIndex__2;
+  createTx_comp : TxIndex__2;
+  signTx : TxIndex__2;
+  burnNotify : record { EthAddress; Wei__1; BlockHeight__1 };
+  validateTx : TxHash__1;
+  syncTx : record { TxIndex__2; bool };
+  getNonce : record { TxIndex__2; opt vec nat };
+};
+type DRC207Support = record {
+  timer : record { interval_seconds : opt nat; enable : bool };
+  monitorable_by_self : bool;
+  monitorable_by_blackhole : record {
+    canister_id : opt principal;
+    allowed : bool;
+  };
+  cycles_receivable : bool;
+};
+type Data = blob;
+type Decider = text;
+type DepositTxn = record {
+  status : Status;
+  signature : blob;
+  claimingTime : Timestamp;
+  confirmedTime : opt Timestamp;
+  error : opt text;
+  account : Account__2;
+  txHash : TxHash;
+  transfer : opt TokenTxn;
+};
+type DepositTxn__1 = record {
+  status : Status;
+  signature : blob;
+  claimingTime : Timestamp;
+  confirmedTime : opt Timestamp;
+  error : opt text;
+  account : Account__2;
+  txHash : TxHash;
+  transfer : opt TokenTxn;
+};
+type Err = record { code : ErrorCode; message : text };
+type ErrorCode = variant {
+  canister_error;
+  call_error : record { err_code : nat32 };
+  system_transient;
+  future : nat32;
+  canister_reject;
+  destination_invalid;
+  system_fatal;
+};
+type ErrorLog = record {
+  result : opt TaskResult;
+  time : Time;
+  ttid : Ttid;
+  callee : opt Callee__1;
+};
+type EthAccount = blob;
+type EthAddress = text;
+type EthAddress__1 = text;
+type EthAddress__2 = text;
+type EthTokenId = blob;
+type Event = variant {
+  depositGas : record {
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  withdraw : record {
+    fee : opt Wei;
+    token : EthAddress__1;
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  keeper : record {
+    operation : variant {
+      setRpc : record {
+        keeper : Account__2;
+        operation : variant {
+          put : record { text; variant { Available; Unavailable } };
+          remove;
+        };
+      };
+    };
+  };
+  continueTransaction : record {
+    txIndex : TxIndex;
+    preTxid : vec TxHash;
+    toid : nat;
+    updateTx : opt UpdateTxArgs;
+    account : Account__2;
+  };
+  depositResult : variant {
+    ok : record {
+      fee : opt Wei;
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  burn : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+    tokenBlockIndex : nat;
+  };
+  init : record { initArgs : InitArgs };
+  mint : record {
+    toid : nat;
+    icTokenCanisterId : principal;
+    account : Account__2;
+    amount : Wei;
+  };
+  send : record {
+    to : Account__2;
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    amount : Wei;
+  };
+  coverTransaction : record {
+    txIndex : TxIndex;
+    preTxid : vec TxHash;
+    toid : nat;
+    updateTx : opt UpdateTxArgs;
+    account : Account__2;
+  };
+  claimDepositResult : variant {
+    ok : record {
+      fee : opt Wei;
+      token : EthAddress__1;
+      signature : text;
+      from : EthAddress__1;
+      account : Account__2;
+      txHash : TxHash;
+      amount : Wei;
+    };
+    err : record {
+      signature : text;
+      error : text;
+      account : Account__2;
+      txHash : TxHash;
+    };
+  };
+  changeOwner : record { newOwner : principal };
+  deposit : record {
+    fee : opt Wei;
+    token : EthAddress__1;
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  start : record { message : opt text };
+  updateTokenPrice : record {
+    token : EthAddress__1;
+    ethRatio : Wei;
+    price : float64;
+  };
+  withdrawResult : variant {
+    ok : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  depositGasResult : variant {
+    ok : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  claimDeposit : record {
+    signature : text;
+    account : Account__2;
+    txHash : TxHash;
+  };
+  config : record {
+    setting : variant {
+      upgradeTokenWasm : record {
+        icTokenCanisterId : principal;
+        version : text;
+        symbol : text;
+      };
+      setToken : record { token : EthAddress__1; info : TokenInfo__1 };
+      depositMethod : nat8;
+      setDexPair : record { token : EthAddress__1; dexPair : opt principal };
+      updateRpc : record {
+        keeper : Account__2;
+        operation : variant {
+          set : variant { Available; Unavailable };
+          remove;
+        };
+      };
+      minRpcConfirmations : nat;
+      launchToken : record {
+        token : EthAddress__1;
+        icTokenCanisterId : principal;
+        symbol : text;
+      };
+      setKeeper : record {
+        url : text;
+        status : variant { Disabled; Normal };
+        name : text;
+        account : Account__2;
+      };
+      dependents : record { utilsTool : principal };
+      setTokenWasm : record { size : nat; version : text };
+      minConfirmations : nat;
+    };
+  };
+  suspend : record { message : opt text };
+};
+type Event__1 = variant {
+  depositGas : record {
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  withdraw : record {
+    fee : opt Wei;
+    token : EthAddress__1;
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  keeper : record {
+    operation : variant {
+      setRpc : record {
+        keeper : Account__2;
+        operation : variant {
+          put : record { text; variant { Available; Unavailable } };
+          remove;
+        };
+      };
+    };
+  };
+  continueTransaction : record {
+    txIndex : TxIndex;
+    preTxid : vec TxHash;
+    toid : nat;
+    updateTx : opt UpdateTxArgs;
+    account : Account__2;
+  };
+  depositResult : variant {
+    ok : record {
+      fee : opt Wei;
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  burn : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+    tokenBlockIndex : nat;
+  };
+  init : record { initArgs : InitArgs };
+  mint : record {
+    toid : nat;
+    icTokenCanisterId : principal;
+    account : Account__2;
+    amount : Wei;
+  };
+  send : record {
+    to : Account__2;
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    amount : Wei;
+  };
+  coverTransaction : record {
+    txIndex : TxIndex;
+    preTxid : vec TxHash;
+    toid : nat;
+    updateTx : opt UpdateTxArgs;
+    account : Account__2;
+  };
+  claimDepositResult : variant {
+    ok : record {
+      fee : opt Wei;
+      token : EthAddress__1;
+      signature : text;
+      from : EthAddress__1;
+      account : Account__2;
+      txHash : TxHash;
+      amount : Wei;
+    };
+    err : record {
+      signature : text;
+      error : text;
+      account : Account__2;
+      txHash : TxHash;
+    };
+  };
+  changeOwner : record { newOwner : principal };
+  deposit : record {
+    fee : opt Wei;
+    token : EthAddress__1;
+    txIndex : TxIndex;
+    toid : nat;
+    address : EthAddress__1;
+    account : Account__2;
+    amount : Wei;
+  };
+  start : record { message : opt text };
+  updateTokenPrice : record {
+    token : EthAddress__1;
+    ethRatio : Wei;
+    price : float64;
+  };
+  withdrawResult : variant {
+    ok : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  depositGasResult : variant {
+    ok : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      txid : vec TxHash;
+      account : Account__2;
+      amount : Wei;
+    };
+    err : record {
+      token : EthAddress__1;
+      txIndex : TxIndex;
+      account : Account__2;
+      amount : Wei;
+    };
+  };
+  claimDeposit : record {
+    signature : text;
+    account : Account__2;
+    txHash : TxHash;
+  };
+  config : record {
+    setting : variant {
+      upgradeTokenWasm : record {
+        icTokenCanisterId : principal;
+        version : text;
+        symbol : text;
+      };
+      setToken : record { token : EthAddress__1; info : TokenInfo__1 };
+      depositMethod : nat8;
+      setDexPair : record { token : EthAddress__1; dexPair : opt principal };
+      updateRpc : record {
+        keeper : Account__2;
+        operation : variant {
+          set : variant { Available; Unavailable };
+          remove;
+        };
+      };
+      minRpcConfirmations : nat;
+      launchToken : record {
+        token : EthAddress__1;
+        icTokenCanisterId : principal;
+        symbol : text;
+      };
+      setKeeper : record {
+        url : text;
+        status : variant { Disabled; Normal };
+        name : text;
+        account : Account__2;
+      };
+      dependents : record { utilsTool : principal };
+      setTokenWasm : record { size : nat; version : text };
+      minConfirmations : nat;
+    };
+  };
+  suspend : record { message : opt text };
+};
+type ExecuteType = variant { fallback; send : nat; sendAll };
+type From = text;
+type HashId = blob;
+type Healthiness = record {
+  recentPersistentErrors : opt nat;
+  calls : nat;
+  time : Timestamp;
+  errors : nat;
+};
+type HttpHeader = record { value : text; name : text };
+type HttpResponsePayload = record {
+  status : nat;
+  body : blob;
+  headers : vec HttpHeader;
+};
+type ICAccount = record { TokenCanisterId; Account__1 };
+type ICAccount__1 = record { TokenCanisterId__1; Account__4 };
+type ICRC1BlockHeight = nat;
+type InitArgs = record {
+  rpc_confirmations : nat;
+  deposit_method : nat8;
+  min_confirmations : opt nat;
+  tx_type : opt TxType;
+};
+type Keeper = record {
+  url : text;
+  status : variant { Disabled; Normal };
+  balance : nat;
+  name : text;
+  account : Account__2;
+};
+type Keeper__1 = record {
+  url : text;
+  status : variant { Disabled; Normal };
+  balance : nat;
+  name : text;
+  account : Account__2;
+};
+type KytRequestId = nat;
+type List = opt record { CompTask; List };
+type ListPage = nat;
+type ListSize = nat;
+type List_1 = opt record { SagaTask; List_1 };
+type MinterInfo = record {
+  decimals : nat8;
+  gasPrice : Wei;
+  totalRetrievalAmount : Wei;
+  owner : principal;
+  depositMethod : nat8;
+  totalMintingAmount : Wei;
+  blockSlot : nat;
+  pendingRetrievals : nat;
+  network : text;
+  countRetrieval : nat;
+  isDebug : bool;
+  syncBlockNumber : BlockHeight__2;
+  version : text;
+  minRpcConfirmations : nat;
+  pendingDeposits : nat;
+  address : EthAddress__1;
+  chainId : nat;
+  minConfirmations : nat;
+  countMinting : nat;
+  symbol : text;
+  paused : bool;
+};
+type Nonce = nat;
+type Nonce__1 = nat;
+type Nonce__2 = nat;
+type Nonce__3 = nat;
+type Order = record {
+  status : OrderStatus;
+  tasks : List_1;
+  callbackStatus : opt Status__3;
+  data : opt blob;
+  name : text;
+  comps : List;
+  time : Time;
+  compStrategy : CompStrategy;
+  allowPushing : variant { Opening; Closed };
+};
+type OrderStatus = variant {
+  Done;
+  Todo;
+  Doing;
+  Recovered;
+  Compensating;
+  Blocking;
+};
+type Order__1 = record {
+  status : OrderStatus;
+  tasks : List_1;
+  callbackStatus : opt Status__3;
+  data : opt blob;
+  name : text;
+  comps : List;
+  time : Time;
+  compStrategy : CompStrategy;
+  allowPushing : variant { Opening; Closed };
+};
+type PendingDepositTxn = record {
+  TxHash;
+  Account__2;
+  blob;
+  bool;
+  Timestamp;
+  opt nat;
+};
+type PubKey = blob;
+type Receipt = variant {
+  result : opt Return;
+  ICRC1 : variant {
+    icrc1_transfer : variant { Ok : nat; Err : TransferError };
+  };
+  ICRC2 : variant {
+    icrc2_approve : variant { Ok : nat; Err : ApproveError };
+    icrc2_transfer_from : variant { Ok : nat; Err : TransferFromError };
+  };
+  none;
+  DRC20 : variant {
+    drc20_transferBatch : vec TxnResult;
+    drc20_approve : TxnResult;
+    drc20_transferFrom : TxnResult;
+    drc20_lockTransferFrom : TxnResult;
+    drc20_dropAccount;
+    drc20_lockTransfer : TxnResult;
+    drc20_transfer : TxnResult;
+    drc20_executeTransfer : TxnResult;
+  };
+};
+type Result = variant { ok : TxHash__1; err : text };
+type ResultError = variant {
+  GenericError : record { code : nat64; message : text };
+};
+type RetrieveResult = record {
+  txIndex : TxIndex;
+  toid : nat;
+  blockIndex : nat;
+  amount : Wei;
+  retrieveFee : Wei;
+};
+type RetrieveStatus = record {
+  ethAddress : EthAddress__1;
+  txIndex : TxIndex;
+  account : Account__2;
+  burnedBlockIndex : ICRC1BlockHeight;
+  amount : Wei;
+  retrieveAccount : Account__2;
+};
+type Return = record { blob; text };
+type RpcFetchLog = record {
+  id : RpcId;
+  status : RpcRequestStatus;
+  result : text;
+  keeper : AccountId__1;
+  time : Timestamp;
+};
+type RpcId = nat;
+type RpcId__1 = nat;
+type RpcLog = record {
+  err : opt text;
+  url : text;
+  result : opt text;
+  time : Timestamp;
+  input : text;
+};
+type RpcLog__1 = record {
+  err : opt text;
+  url : text;
+  result : opt text;
+  time : Timestamp;
+  input : text;
+};
+type RpcProvider = record {
+  url : text;
+  status : variant { Available; Unavailable };
+  keeper : AccountId__1;
+  calls : nat;
+  name : text;
+  errors : nat;
+  latestCall : Timestamp;
+  healthCheck : Healthiness;
+  preHealthCheck : Healthiness;
+};
+type RpcProvider__1 = record {
+  url : text;
+  status : variant { Available; Unavailable };
+  keeper : AccountId__1;
+  calls : nat;
+  name : text;
+  errors : nat;
+  latestCall : Timestamp;
+  healthCheck : Healthiness;
+  preHealthCheck : Healthiness;
+};
+type RpcRequestConsensus = record {
+  status : RpcRequestStatus;
+  requests : vec RpcFetchLog;
+  confirmed : nat;
+};
+type RpcRequestConsensus__1 = record {
+  status : RpcRequestStatus;
+  requests : vec RpcFetchLog;
+  confirmed : nat;
+};
+type RpcRequestId = nat;
+type RpcRequestId__1 = nat;
+type RpcRequestStatus = variant { ok : vec Value; err : text; pending };
+type Sa = blob;
+type Sa__1 = blob;
+type SagaData = record {
+  orders : vec record { Toid__2; Order };
+  autoClearTimeout : int;
+  aliveOrders : vec record { Toid__2; Time };
+  index : nat;
+  actuator : record {
+    tasks : record {
+      vec record { Ttid__1; Task__1 };
+      vec record { Ttid__1; Task__1 };
+    };
+    callees : vec record { Callee; CalleeStatus };
+    errorLogs : vec record { nat; ErrorLog };
+    taskLogs : vec record { Ttid__1; TaskEvent };
+    index : nat;
+    firstErrIndex : nat;
+    errIndex : nat;
+    firstIndex : nat;
+  };
+  taskEvents : vec record { Toid__2; vec Ttid__1 };
+  firstIndex : nat;
+};
+type SagaTask = record {
+  status : Status__3;
+  comp : opt Compensation;
+  task : Task__2;
+  ttid : Ttid__2;
+};
+type Signature = record {
+  r : blob;
+  s : blob;
+  v : nat64;
+  from : opt blob;
+  hash : blob;
+};
+type Spender = text;
+type Status = variant {
+  Signing;
+  Building;
+  Confirmed;
+  Sending;
+  Unknown;
+  Submitted;
+  Failure;
+  Pending;
+};
+type Status__1 = variant { Error; Done; Todo; Doing; Unknown };
+type Status__2 = variant { Error; Done; Todo; Doing; Unknown };
+type Status__3 = variant { Error; Done; Todo; Doing; Unknown };
+type Status__4 = variant {
+  Signing;
+  Building;
+  Confirmed;
+  Sending;
+  Unknown;
+  Submitted;
+  Failure;
+  Pending;
+};
+type Subaccount = blob;
+type Task = record {
+  preTtid : vec Ttid;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee__1;
+  forTtid : opt Ttid;
+};
+type TaskEvent = record {
+  result : TaskResult;
+  callbackStatus : opt Status__2;
+  task : Task;
+  time : Time;
+  toid : opt Toid__1;
+  ttid : Ttid;
+  attempts : Attempts;
+  txHash : blob;
+};
+type TaskResult = record { Status__1; opt Receipt; opt Err };
+type Task__1 = record {
+  preTtid : vec Ttid;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee__1;
+  forTtid : opt Ttid;
+};
+type Task__2 = record {
+  preTtid : vec Ttid;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee__1;
+  forTtid : opt Ttid;
+};
+type Tcid = nat;
+type Time = int;
+type Timeout = nat32;
+type Timestamp = nat;
+type Timestamp__1 = nat;
+type Timestamp__2 = nat64;
+type Timestamp__3 = nat;
+type To = text;
+type Toid = nat;
+type Toid__1 = nat;
+type Toid__2 = nat;
+type TokenCanisterId = principal;
+type TokenCanisterId__1 = principal;
+type TokenId = blob;
+type TokenId__1 = blob;
+type TokenInfo = record {
+  fee : record { fixedFee : Wei; ethRatio : Wei; gasLimit : nat };
+  std : variant { ETH; ERC20 };
+  decimals : nat8;
+  dexPrice : opt record { float64; Timestamp };
+  tokenId : EthAddress__1;
+  minAmount : Wei;
+  totalSupply : opt Wei;
+  ckLedgerId : principal;
+  ckSymbol : text;
+  dexPair : opt principal;
+  symbol : text;
+};
+type TokenInfo__1 = record {
+  fee : record { fixedFee : Wei; ethRatio : Wei; gasLimit : nat };
+  std : variant { ETH; ERC20 };
+  decimals : nat8;
+  dexPrice : opt record { float64; Timestamp };
+  tokenId : EthAddress__1;
+  minAmount : Wei;
+  totalSupply : opt Wei;
+  ckLedgerId : principal;
+  ckSymbol : text;
+  dexPair : opt principal;
+  symbol : text;
+};
+type TokenTxn = record {
+  to : EthAddress__1;
+  token : EthAddress__1;
+  value : Wei;
+  from : EthAddress__1;
+};
+type Transaction = variant {
+  EIP1559 : Transaction1559;
+  EIP2930 : Transaction2930;
+  Legacy : TransactionLegacy;
+};
+type Transaction1559 = record {
+  to : blob;
+  value : blob;
+  max_priority_fee_per_gas : blob;
+  data : blob;
+  sign : opt Signature;
+  max_fee_per_gas : blob;
+  chain_id : nat64;
+  nonce : blob;
+  gas_limit : blob;
+  access_list : vec AccessList;
+};
+type Transaction2930 = record {
+  to : blob;
+  value : blob;
+  data : blob;
+  sign : opt Signature;
+  chain_id : nat64;
+  nonce : blob;
+  gas_limit : blob;
+  access_list : vec AccessList;
+  gas_price : blob;
+};
+type TransactionLegacy = record {
+  to : blob;
+  value : blob;
+  data : blob;
+  sign : opt Signature;
+  chain_id : nat64;
+  nonce : blob;
+  gas_limit : blob;
+  gas_price : blob;
+};
+type TransferArgs = record {
+  to : Account__3;
+  fee : opt nat;
+  memo : opt blob;
+  from_subaccount : opt Subaccount;
+  created_at_time : opt Timestamp__2;
+  amount : nat;
+};
+type TransferError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type TransferFromArgs = record {
+  to : Account__3;
+  fee : opt nat;
+  spender_subaccount : opt blob;
+  from : Account__3;
+  memo : opt blob;
+  created_at_time : opt nat64;
+  amount : nat;
+};
+type TransferFromError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  InsufficientAllowance : record { allowance : nat };
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type TransformArgs = record { context : blob; response : HttpResponsePayload };
+type TrieList = record {
+  total : nat;
+  data : vec record { RpcRequestId__1; RpcRequestConsensus__1 };
+  totalPage : nat;
+};
+type TrieList_1 = record {
+  total : nat;
+  data : vec record { AccountId__2; RpcProvider__1 };
+  totalPage : nat;
+};
+type TrieList_2 = record {
+  total : nat;
+  data : vec record { RpcId__1; RpcLog__1 };
+  totalPage : nat;
+};
+type TrieList_3 = record {
+  total : nat;
+  data : vec record { AccountId__2; Keeper__1 };
+  totalPage : nat;
+};
+type TrieList_4 = record {
+  total : nat;
+  data : vec record { BlockHeight__1; record { Event__1; Timestamp__3 } };
+  totalPage : nat;
+};
+type Ttid = nat;
+type Ttid__1 = nat;
+type Ttid__2 = nat;
+type TxHash = text;
+type TxHashId = blob;
+type TxHash__1 = text;
+type TxHash__2 = text;
+type TxIndex = nat;
+type TxIndex__1 = nat;
+type TxIndex__2 = nat;
+type TxStatus = record {
+  to : EthAddress__1;
+  tx : opt Transaction;
+  fee : record { gasPrice : Wei; maxFee : Wei; gasLimit : nat };
+  status : Status;
+  toids : vec nat;
+  tokenId : EthAddress__1;
+  receipt : opt text;
+  kytRequestId : opt KytRequestId;
+  from : EthAddress__1;
+  signedTx : opt record { blob; blob };
+  nonce : opt Nonce__2;
+  account : Account__2;
+  txHash : vec TxHash;
+  txType : variant { Withdraw; DepositGas; Deposit };
+  rpcRequestId : opt RpcRequestId;
+  amount : Wei;
+  rawTx : opt record { blob; blob };
+};
+type TxType = variant { EIP1559; EIP2930; Legacy };
+type Txid = blob;
+type TxnResult = variant {
+  ok : Txid;
+  err : record {
+    code : variant {
+      NonceError;
+      InsufficientGas;
+      InsufficientAllowance;
+      UndefinedError;
+      InsufficientBalance;
+      NoLockedTransfer;
+      DuplicateExecutedTransfer;
+      LockedTransferExpired;
+    };
+    message : text;
+  };
+};
+type UpdateBalanceResult = record {
+  txIndex : TxIndex;
+  toid : nat;
+  blockIndex : nat;
+  amount : Wei;
+};
+type UpdateTxArgs = record {
+  ts : opt Timestamp;
+  tx : opt Transaction;
+  fee : opt record { gasPrice : Wei; maxFee : Wei; gasLimit : nat };
+  status : opt Status;
+  toids : opt vec nat;
+  receipt : opt text;
+  kytRequestId : opt KytRequestId;
+  signedTx : opt record { blob; blob };
+  nonce : opt Nonce__2;
+  txHash : opt TxHash;
+  rpcRequestId : opt RpcRequestId;
+  amount : opt Wei;
+  rawTx : opt record { blob; blob };
+};
+type Value = variant {
+  Int : int;
+  Nat : nat;
+  Raw : blob;
+  Empty;
+  Bool : bool;
+  Text : text;
+  Float : float64;
+};
+type Value__1 = variant {
+  Int : int;
+  Nat : nat;
+  Raw : blob;
+  Empty;
+  Bool : bool;
+  Text : text;
+  Float : float64;
+};
+type Wei = nat;
+type Wei__1 = nat;
+type Wei__2 = nat;
+type canister_status = record {
+  status : variant { stopped; stopping; running };
+  memory_size : nat;
+  cycles : nat;
+  settings : definite_canister_settings;
+  module_hash : opt blob;
+};
+type definite_canister_settings = record {
+  freezing_threshold : nat;
+  controllers : vec principal;
+  memory_allocation : nat;
+  compute_allocation : nat;
+};
+type icETHMinter = service {
+  addRpcWhitelist : (text) -> ();
+  allocateRewards : (
+      vec record {
+        _value : Wei__1;
+        _sendRetainedBalance : bool;
+        _account : Account;
+      },
+    ) -> (vec record { Account; bool });
+  backup : (BackupRequest) -> (BackupResponse);
+  changeOwner : (principal) -> (bool);
+  claim : (Account, TxHash__1, blob) -> (
+      variant { Ok : BlockHeight__1; Err : ResultError },
+    );
+  clearCkTransactions : () -> ();
+  clearDepositTxns : () -> ();
+  clearEvents : (BlockHeight__1, BlockHeight__1) -> ();
+  clearRpcLogs : (RpcId__1, RpcId__1) -> ();
+  clearRpcRequests : (RpcRequestId__1, RpcRequestId__1) -> ();
+  confirmRetrievalTx : (TxIndex__2) -> (bool);
+  cover_tx : (TxIndex__2, opt blob) -> (opt BlockHeight__1);
+  debug_canister_status : (principal) -> (canister_status);
+  debug_clearMethod2Txn : () -> ();
+  debug_convertFees : () -> ();
+  debug_fetchPairPrice : (principal) -> (float64);
+  debug_fetch_address : (Account) -> (PubKey, EthAccount, EthAddress);
+  debug_fetch_balance : (opt EthAddress, EthAddress, bool) -> (nat);
+  debug_fetch_nonce : (variant { pending; latest }) -> (Nonce);
+  debug_fetch_receipt : (TxHash__1) -> (
+      bool,
+      BlockHeight__1,
+      Status__4,
+      opt vec text,
+    );
+  debug_fetch_token_metadata : (EthAddress) -> (
+      record { decimals : nat8; symbol : text },
+    );
+  debug_fetch_txn : (TxHash__1) -> (
+      bool,
+      opt TokenTxn,
+      BlockHeight__1,
+      Status__4,
+      opt nat,
+      opt vec text,
+    );
+  debug_get_address : (Account) -> (EthAddress, Nonce);
+  debug_get_rpc : (nat) -> (AccountId__2, text, nat);
+  debug_get_tx : (TxIndex__2) -> (opt TxStatus);
+  debug_local_createTx : (TxIndex__2) -> (
+      record { txi : nat; txHash : TxHash__1; rawTx : blob },
+    );
+  debug_local_getNonce : (TxIndex__2) -> (
+      record { txi : nat; address : EthAddress; nonce : Nonce },
+    );
+  debug_local_sendTx : (TxIndex__2) -> (
+      record { txi : nat; result : Result; rpcId : RpcId__1 },
+    );
+  debug_local_signTx : (TxIndex__2) -> (
+      record { txi : nat; signature : blob; txHash : TxHash__1; rawTx : blob },
+    );
+  debug_monitor : () -> ();
+  debug_new_tx : (
+      variant { Withdraw; DepositGas; Deposit },
+      Account,
+      opt EthAddress,
+      EthAddress,
+      EthAddress,
+      Wei__1,
+    ) -> (TxIndex__2);
+  debug_outcall : (text, text, nat64) -> (nat, blob, text);
+  debug_reconciliation : () -> ();
+  debug_removeDepositingTxi : (AccountId__2, TxIndex__2) -> ();
+  debug_removePendingDepositTxn : (TxHash__1) -> ();
+  debug_removeRetrievingTxi : (TxIndex__2) -> ();
+  debug_send_to : (principal, EthAddress, EthAddress, Wei__1) -> (TxIndex__2);
+  debug_sha3 : (text) -> (text);
+  debug_sign_and_recover_msg : (text) -> (
+      record {
+        signature : text;
+        recovered : text;
+        msgHash : text;
+        address : text;
+      },
+    );
+  debug_sync_tx : (TxIndex__2) -> ();
+  debug_updateBalance : (opt AccountId__2) -> ();
+  debug_updateTokenEthRatio : () -> ();
+  debug_updateTokenPrice : (EthAddress) -> ();
+  debug_verify_sign : (EthAddress, Account, TxHash__1, blob) -> (
+      text,
+      record { r : blob; s : blob; v : nat64 },
+      EthAddress,
+    );
+  drc207 : () -> (DRC207Support) query;
+  getCkTokenWasmHistory : () -> (vec record { text; nat }) query;
+  getCkTokenWasmVersion : () -> (text, nat) query;
+  getOwner : () -> (principal) query;
+  get_account_events : (AccountId__2) -> (
+      vec record { Event__1; Timestamp__3 },
+    ) query;
+  get_cached_account : (Address__1) -> (opt vec ICAccount__1) query;
+  get_cached_address : (AccountId__3) -> (opt vec ChainAccount__1) query;
+  get_cached_tx_account : (TxHash__2) -> (
+      opt vec record { ChainAccount__1; ICAccount__1 },
+    ) query;
+  get_ck_tokens : () -> (vec record { EthAddress; TokenInfo }) query;
+  get_deposit_address : (Account) -> (EthAddress);
+  get_depositing_all : (
+      variant { all; eth; token : EthAddress },
+      opt Account,
+    ) -> (vec record { Wei__1; opt TxIndex__2; opt TxStatus }) query;
+  get_event : (BlockHeight__1) -> (opt record { Event__1; Timestamp__3 }) query;
+  get_event_count : () -> (nat) query;
+  get_event_first_index : () -> (BlockHeight__1) query;
+  get_events : (opt ListPage, opt ListSize) -> (TrieList_4) query;
+  get_fee_balance : (opt EthAddress) -> (Wei__1) query;
+  get_keepers : () -> (TrieList_3) query;
+  get_minter_address : () -> (EthAddress, Nonce) query;
+  get_minter_info : () -> (MinterInfo) query;
+  get_mode2_deposit_txn : (TxHash__1) -> (
+      opt record { DepositTxn__1; Timestamp__3 },
+    ) query;
+  get_mode2_pending_all : (
+      variant { all; eth; token : EthAddress },
+      opt Account,
+    ) -> (vec record { DepositTxn; Timestamp__3; bool }) query;
+  get_mode2_pending_deposit_txn : (TxHash__1) -> (opt PendingDepositTxn) query;
+  get_pool_balance : (opt EthAddress) -> (Wei__1) query;
+  get_retrieval : (TxIndex__2) -> (opt RetrieveStatus) query;
+  get_retrieval_list : (Account) -> (vec RetrieveStatus) query;
+  get_retrieving_all : (
+      variant { all; eth; token : EthAddress },
+      opt Account,
+    ) -> (vec record { TxIndex__2; TxStatus; Timestamp__3 }) query;
+  get_rpc_log : (RpcId__1) -> (opt RpcLog__1) query;
+  get_rpc_logs : (opt ListPage, opt ListSize) -> (TrieList_2) query;
+  get_rpc_providers : () -> (TrieList_1) query;
+  get_rpc_request : (RpcRequestId__1) -> (opt RpcRequestConsensus__1) query;
+  get_rpc_request_temps : () -> (
+      vec record {
+        RpcRequestId__1;
+        record { vec record { vec Value__1; nat }; Timestamp__3 };
+      },
+    ) query;
+  get_rpc_requests : (opt ListPage, opt ListSize) -> (TrieList) query;
+  get_tx : (TxIndex__2) -> (opt TxStatus) query;
+  get_withdrawal_account : (Account) -> (Account__2) query;
+  ictc_TM : () -> (text) query;
+  ictc_addAdmin : (principal) -> ();
+  ictc_appendTT : (
+      opt blob,
+      Toid,
+      opt Ttid__2,
+      principal,
+      CallType__1,
+      vec Ttid__2,
+    ) -> (Ttid__2);
+  ictc_blockTO : (Toid) -> (opt Toid);
+  ictc_clearLog : (opt int, bool) -> ();
+  ictc_clearTTPool : () -> ();
+  ictc_completeTO : (Toid, OrderStatus) -> (bool);
+  ictc_doneTO : (Toid, OrderStatus, bool) -> (bool);
+  ictc_doneTT : (Toid, Ttid__2, bool) -> (opt Ttid__2);
+  ictc_getAdmins : () -> (vec principal) query;
+  ictc_getCalleeStatus : (principal) -> (opt CalleeStatus) query;
+  ictc_getTO : (Toid) -> (opt Order__1) query;
+  ictc_getTOCount : () -> (nat) query;
+  ictc_getTOPool : () -> (vec record { Toid; opt Order__1 }) query;
+  ictc_getTOs : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { Toid; Order__1 };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_getTT : (Ttid__2) -> (opt TaskEvent) query;
+  ictc_getTTByTO : (Toid) -> (vec TaskEvent) query;
+  ictc_getTTErrors : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { nat; ErrorLog };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_getTTPool : () -> (vec record { Ttid__2; Task__2 }) query;
+  ictc_getTTs : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { Ttid__2; TaskEvent };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_redoTT : (Toid, Ttid__2) -> (opt Ttid__2);
+  ictc_removeAdmin : (principal) -> ();
+  ictc_runTO : (Toid) -> (opt OrderStatus);
+  ictc_runTT : () -> (bool);
+  keeper_set_rpc : (
+      variant {
+        put : record { text; text; variant { Available; Unavailable } };
+        remove;
+      },
+      opt Sa__1,
+    ) -> (bool);
+  launchToken : (
+      opt EthAddress,
+      opt text,
+      record {
+        minAmount : Wei__1;
+        fixedFee : Wei__1;
+        totalSupply : opt Wei__1;
+        ethRatio : Wei__1;
+        ckTokenFee : Wei__1;
+        gasLimit : nat;
+      },
+    ) -> (principal);
+  monitor_canisters : () -> (vec record { principal; nat }) query;
+  monitor_put : (principal) -> ();
+  monitor_remove : (principal) -> ();
+  rebuildAndContinue : (
+      TxIndex__2,
+      Toid,
+      variant { Remain; Reset : record { spentTxHash : TxHash__1 } },
+    ) -> (opt BlockHeight__1);
+  rebuildAndResend : (
+      TxIndex__2,
+      variant { Remain; Reset : record { spentTxHash : TxHash__1 } },
+      bool,
+      Wei__1,
+      bool,
+    ) -> (opt BlockHeight__1);
+  recovery : (BackupResponse) -> (bool);
+  removeRpcWhitelist : (text) -> ();
+  removeToken : (opt EthAddress) -> ();
+  resetNonce : (variant { pending; latest }) -> (Nonce);
+  retrieve : (opt EthAddress, EthAddress, Wei__1, opt blob) -> (
+      variant { Ok : RetrieveResult; Err : ResultError },
+    );
+  rpc_call_transform : (TransformArgs) -> (HttpResponsePayload) query;
+  sendBlankTx : (nat) -> (Toid);
+  setCkTokenWasm : (blob, text) -> ();
+  setDepositMethod : (nat8) -> (bool);
+  setKeeper : (Account, opt text, opt text, variant { Disabled; Normal }) -> (
+      bool,
+    );
+  setMinConfirmations : (nat) -> (bool);
+  setMinRpcConfirmations : (nat) -> (bool);
+  setPause : (bool) -> (bool);
+  setTokenDexPair : (
+      variant {
+        ETH : record { dexPair : principal; quoteToken : EthAddress };
+        ERC20 : record { tokenId : EthAddress; dexPair : principal };
+      },
+    ) -> (bool);
+  setTokenFees : (
+      opt EthAddress,
+      record {
+        minAmount : Wei__1;
+        fixedFee : Wei__1;
+        totalSupply : opt nat;
+        ethRatio : opt Wei__1;
+        gasLimit : nat;
+      },
+    ) -> (bool);
+  setTokenInfo : (opt EthAddress, TokenInfo) -> ();
+  setTokenLogo : (principal, text) -> (bool);
+  sync : () -> (nat, nat, nat, text, nat);
+  timerStart : (nat, nat) -> ();
+  timerStop : () -> ();
+  updateMinterBalance : (opt EthAddress, bool) -> (
+      record { pre : BalanceStats; post : BalanceStats; shortfall : Wei__1 },
+    );
+  updateRpc : (
+      Account,
+      variant { set : variant { Available; Unavailable }; remove },
+    ) -> (bool);
+  update_balance : (opt EthAddress, Account) -> (
+      variant { Ok : UpdateBalanceResult; Err : ResultError },
+    );
+  upgradeToken : (principal, text) -> (text);
+  wallet_receive : () -> ();
+};
+service : icETHMinter

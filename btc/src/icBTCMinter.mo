@@ -18,7 +18,6 @@ import Nat8 "mo:base/Nat8";
 import Nat32 "mo:base/Nat32";
 import Nat64 "mo:base/Nat64";
 import Int "mo:base/Int";
-import Int32 "mo:base/Int32";
 import Int64 "mo:base/Int64";
 import Float "mo:base/Float";
 import Iter "mo:base/Iter";
@@ -26,12 +25,11 @@ import List "mo:base/List";
 import Time "mo:base/Time";
 import Text "mo:base/Text";
 import Deque "mo:base/Deque";
-import Order "mo:base/Order";
 import Cycles "mo:base/ExperimentalCycles";
 import ICRC1 "mo:icl/ICRC1";
 import Binary "mo:icl/Binary";
 import Tools "mo:icl/Tools";
-import SagaTM "./ICTC/SagaTM";
+import SagaTM "mo:ictc/SagaTM";
 import DRC207 "mo:icl/DRC207";
 import Error "mo:base/Error";
 import Debug "mo:base/Debug";
@@ -58,6 +56,7 @@ import KYT "mo:icl/KYT";
 import ICEvents "mo:icl/ICEvents";
 import DRC20 "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
+import Backup "lib/BackupTypes";
 
 // InitArgs = {
 //     retrieve_btc_min_amount : Nat64; // 10000
@@ -67,17 +66,17 @@ import ICTokens "mo:icl/ICTokens";
 //     dex_pair: ?Principal;
 //     mode: Mode;
 //   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}
-shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
+// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}, true/false
+shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: Bool) = this {
     // assert(initArgs.ecdsa_key_name == "key_1"); 
     // assert(initArgs.btc_network == #Mainnet); 
     assert(Option.get(initArgs.min_confirmations, 0:Nat32) > 3); /*config*/
     type Network = Minter.BtcNetwork;
     type Account = Minter.Account;
-    type Address = ICBTC.BitcoinAddress; // Minter.BitcoinAddress?
+    type Address = ICBTC.BitcoinAddress; // not Minter.BitcoinAddress
     type TypeAddress = Minter.TypeAddress;
     type Satoshi = ICBTC.Satoshi; // Nat64
-    type Utxo = ICBTC.Utxo; // Minter.Utxo?
+    type Utxo = ICBTC.Utxo; // not Minter.Utxo
     type MillisatoshiPerByte = ICBTC.MillisatoshiPerByte;
     type PublicKey = EcdsaTypes.PublicKey;
     type Transaction = Transaction.Transaction;
@@ -100,6 +99,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     type ListSize = Minter.ListSize;
     type TrieList<K, V> = Minter.TrieList<K, V>;
     type SignFun = (Text, [Blob], Blob) -> async Blob;
+    type CustomCallType = {
+        #buildTx: (txi: Nat);
+        #sendTx: (txi: Nat, txid: [Nat8]);
+    };
 
     let CURVE = ICBTC.CURVE;
     let SIGHASH_ALL : SighashType = 0x01;
@@ -117,10 +120,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     let MIN_VISIT_INTERVAL : Nat = 30; //seconds
     let AVG_TX_BYTES : Nat64 = 450; /*config*/
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
+    let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
-    private var app_debug : Bool = true; /*config*/
-    private let version_: Text = "0.2.3"; /*config*/
+    private stable var app_debug : Bool = enDebug; // Cannot be modified
+    private let version_: Text = "0.3.0"; /*config*/
     private let ns_: Nat = 1000000000;
+    private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private var pause: Bool = initArgs.mode == #ReadOnly;
     private stable var owner: Principal = installMsg.caller;
     private stable var ic_: Principal = Principal.fromText("aaaaa-aa"); 
@@ -144,7 +149,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private stable var maxExecutionDuration: Int = 0;
     private stable var lastSagaRunningTime : Time.Time = 0;
     private stable var countAsyncMessage : Nat = 0;
-    // private stable var countICTCError: Nat = 0;
 
     private stable var blockIndex : BlockHeight = 0; // @deprecated
     private stable var minterUtxos = Deque.empty<VaultUtxo>(); // (Address, PubKey, DerivationPath, Utxo);
@@ -153,20 +157,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private stable var totalBtcReceiving: Nat64 = 0;
     private stable var totalBtcSent: Nat64 = 0;
     private stable var feeBalance : Nat64 = 0;
+    private stable var accountAddresses = Trie.empty<AccountId, ([Nat8], Text)>(); 
     private stable var lastFetchUtxosTime : Time.Time = 0;
     private stable var accountUtxos = Trie.empty<Address, (PubKey, DerivationPath, [Utxo])>(); 
     private stable var latestVisitTime = Trie.empty<Principal, Timestamp>(); 
-    private stable var retrieveBTC = Trie.empty<EventBlockHeight, Minter.RetrieveStatus>();  
-    private stable var sendingBTC = Trie.empty<TxIndex, Minter.SendingBtcStatus>();  
+    private stable var retrieveBTC = Trie.empty<EventBlockHeight, Minter.RetrieveStatus>(); // retrieval Events
+    private stable var sendingBTC = Trie.empty<TxIndex, Minter.SendingBtcStatus>(); // ck txns
     private stable var txInProcess : [TxIndex] = [];
     private stable var txIndex : TxIndex = 0;
+    private stable var firstTxIndex : TxIndex = 0;
     private stable var lastTxTime : Time.Time = 0;
     private stable var blockEvents = Trie.empty<Nat, EventOldVerson>(); // @deprecated
     private stable var minter_public_key : [Nat8] = [];
     private stable var minter_address = "";
     private stable var icrc1WasmHistory: [(wasm: [Nat8], version: Text)] = [];
     
-    // KYT (TODO)
+    // KYT
     private stable var kyt_accountAddresses: KYT.AccountAddresses = Trie.empty(); 
     private stable var kyt_addressAccounts: KYT.AddressAccounts = Trie.empty(); 
     private stable var kyt_txAccounts: KYT.TxAccounts = Trie.empty(); 
@@ -179,25 +185,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private stable var cyclesMonitor: CyclesMonitor.MonitoredCanisters = Trie.empty(); 
     private stable var lastMonitorTime: Nat = 0;
 
-    // @deprecated
-    private func _getEvent(_blockIndex: Nat64) : ?EventOldVerson{
-        switch(Trie.get(blockEvents, keyn(Nat64.toNat(_blockIndex)), Nat.equal)){
-            case(?(event)){ return ?event };
-            case(_){ return null };
-        };
-    };
-    // @deprecated
-    private func _getEvents(_start : Nat64, _length : Nat64) : [EventOldVerson]{
-        assert(_length > 0);
-        var events : [EventOldVerson] = [];
-        for (index in Iter.range(Nat64.toNat(_start), Nat64.toNat(_start) + Nat64.toNat(_length) - 1)){
-            switch(Trie.get(blockEvents, keyn(index), Nat.equal)){
-                case(?(event)){ events := Tools.arrayAppend([event], events)};
-                case(_){};
-            };
-        };
-        return events;
-    };
     private func _addMinterUtxos(_address: Address, _pubkey: PubKey, _dpath: DerivationPath, _utxos: [Utxo]) : (){
         for (utxo in Array.reverse(_utxos).vals()){
             let vaultUtxo : VaultUtxo = (_address, _pubkey, _dpath, utxo);
@@ -226,6 +213,20 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             };
         };
     };
+    private func _accountUtxosLatestHeight(_address: Text) : Nat32{
+        switch(_getAccountUtxos(_address)){
+            case(?(item)){
+                if (item.2.size() > 0){
+                    return item.2[0].height;
+                }else{
+                    return 0;
+                };
+            };
+            case(_){
+                return 0;
+            };
+        };
+    };
     private func _getLatestVisitTime(_address: Principal) : Timestamp{
         switch(Trie.get(latestVisitTime, keyp(_address), Principal.equal)){
             case(?(v)){ return v };
@@ -235,8 +236,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private func _setLatestVisitTime(_address: Principal) : (){
         latestVisitTime := Trie.put(latestVisitTime, keyp(_address), Principal.equal, _now()).0;
         latestVisitTime := Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
-            _now() < v + 24*3600
+            _now() < v + 3600
         });
+    };
+    private func _dosCheck(_accountId: AccountId, _max: Nat) : Bool{
+        let data = Trie.filter(latestVisitTime, func (k: Principal, v: Timestamp): Bool{ 
+            _now() < v + 30 // 30 seconds
+        });
+        if (Trie.size(data) >= _max){
+            if(Option.isSome(Trie.get(kyt_accountAddresses, keyb(_accountId), Blob.equal))){
+                return true;
+            }else{
+                return false;
+            };
+        }else{
+            return true;
+        };
     };
 
     private func _now() : Timestamp{
@@ -248,32 +263,16 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private func _checkAsyncMessageLimit() : Bool{
         return _asyncMessageSize() < 400; /*config*/
     };
+    // cycles limit
+    private func _checkCycles(): Bool{
+        return Cycles.balance() > minCyclesBalance;
+    };
+
     private func keyb(t: Blob) : Trie.Key<Blob> { return { key = t; hash = Blob.hash(t) }; };
     private func keyt(t: Text) : Trie.Key<Text> { return { key = t; hash = Text.hash(t) }; };
     private func keyp(t: Principal) : Trie.Key<Principal> { return { key = t; hash = Principal.hash(t) }; };
     private func keyn(t: Nat) : Trie.Key<Nat> { return { key = t; hash = Tools.natHash(t) }; };
-    private func trieItems<K, V>(_trie: Trie.Trie<K,V>, _page: Nat, _size: Nat) : TrieList<K, V> {
-        let length = Trie.size(_trie);
-        if (_page < 1 or _size < 1){
-            return {data = []; totalPage = 0; total = length; };
-        };
-        let offset = Nat.sub(_page, 1) * _size;
-        var totalPage: Nat = length / _size;
-        if (totalPage * _size < length) { totalPage += 1; };
-        if (offset >= length){
-            return {data = []; totalPage = totalPage; total = length; };
-        };
-        let end: Nat = offset + Nat.sub(_size, 1);
-        var i: Nat = 0;
-        var res: [(K, V)] = [];
-        for ((k,v) in Trie.iter<K, V>(_trie)){
-            if (i >= offset and i <= end){
-                res := Tools.arrayAppend(res, [(k,v)]);
-            };
-            i += 1;
-        };
-        return {data = res; totalPage = totalPage; total = length; };
-    };
+
     private func _toSaBlob(_sa: ?Sa) : ?Blob{
         switch(_sa){
             case(?(sa)){ return ?Blob.fromArray(sa); };
@@ -329,7 +328,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
 
     /// SagaTM
     // Local tasks
-    private func _local_buildTx(_txi: Nat) : async {txi: Nat; signedTx: [Nat8]}{ 
+    private func _local_buildTx(_txi: Nat) : async* {txi: Nat; signedTx: [Nat8]}{ 
         switch(Trie.get(sendingBTC, keyn(_txi), Nat.equal)){
             case(?(tx)){
                 if (tx.status == #Signing){
@@ -340,8 +339,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                         let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(_txi)));
                         let saga = _getSaga();
                         saga.open(toid);
-                        let task = _buildTask(?txiBlob, Principal.fromActor(this), #This(#sendTx(_txi, signed.txid)), [], 0);
-                        let ttid = saga.push(toid, task, null, null);
+                        let task = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#sendTx(_txi, signed.txid)), [], 0, null, null);
+                        let _ttid = saga.push(toid, task, null, null);
                         saga.close(toid);
                     }else{
                         throw Error.reject("415: The toid does not exist!");
@@ -354,13 +353,13 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             case(_){ throw Error.reject("415: The transaction record does not exist!"); };
         };
     };
-    private func _local_sendTx(_txi: Nat, _txid: [Nat8]) : async {txi: Nat; destinations: [(Nat64, Text, Nat64)]; txid: Text}{ 
+    private func _local_sendTx(_txi: Nat, _txid: [Nat8]) : async* {txi: Nat; destinations: [(Nat64, Text, Nat64)]; txid: [Nat8]}{ 
         switch(Trie.get(sendingBTC, keyn(_txi), Nat.equal)){
             case(?(tx)){
                 if (Option.isSome(tx.signedTx)){
                     let signedTx: [Nat8] = Option.get(tx.signedTx, []);
                     let transaction_fee = SEND_TRANSACTION_BASE_COST_CYCLES + signedTx.size() * SEND_TRANSACTION_COST_CYCLES_PER_BYTE;
-                    Cycles.add(transaction_fee);
+                    Cycles.add<system>(transaction_fee);
                     await ic.bitcoin_send_transaction({ network = NETWORK; transaction = signedTx; });
                     ignore _updateSendingBtc(_txi, null, null, null, ?#Submitted({ txid = _txid }), [], ?[]);
                     var i : Nat32 = 0;
@@ -374,13 +373,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                                 _putTxAccount(Hex.encode(_txid), item.btcAddress, item.retrieveAccount);
                                 let event : Minter.Event = #sent_transaction({account = item.account; retrieveAccount = item.retrieveAccount; address = item.btcAddress; change_output = ?{value = dest.2; vout = i }; txid = Hex.encode(_txid); utxos = eventUtxos; requests = [dest.0]; });
                                 ignore _putEvent(event, ?_accountId(item.account.owner, item.account.subaccount));
-                                // blockEvents := Trie.put(blockEvents, keyn(Nat64.toNat(blockIndex)), Nat.equal, event).0;
                             };
                             case(_){};
                         };
                         i += 1;
                     };
-                    return {txi = _txi; destinations = tx.destinations; txid = Utils.bytesToText(_txid) };
+                    return {txi = _txi; destinations = tx.destinations; txid = _txid };
                 }else{
                     throw Error.reject("416: The signedTx field cannot be empty!");
                 };
@@ -389,34 +387,19 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         };
     };
     // Local task entrance
-    // private func _local(_args: SagaTM.CallType, _receipt: ?SagaTM.Receipt) : (SagaTM.TaskResult){
-    //     switch(_args){
-    //         case(#This(method)){
-    //             switch(method){
-    //                 // case(#dip20Send(_a, _value)){
-    //                 //     var result = (); // Receipt
-    //                 //     // do
-    //                 //     result := _dip20Send(_a, _value);
-    //                 //     // check & return
-    //                 //     return (#Done, ?#This(#dip20Send), null);
-    //                 // };
-    //                 case(_){return (#Error, null, ?{code=#future(9901); message="Non-local function."; });};
-    //             };
-    //         };
-    //         case(_){ return (#Error, null, ?{code=#future(9901); message="Non-local function."; });};
-    //     };
-    // };
-    private func _local(_args: SagaTM.CallType, _receipt: ?SagaTM.Receipt) : async (SagaTM.TaskResult){
+    private func _customCall(_callee: Principal, _cycles: Nat, _args: SagaTM.CallType<CustomCallType>, _receipt: ?SagaTM.Receipt) : async (SagaTM.TaskResult){
         switch(_args){
-            case(#This(method)){
+            case(#custom(method)){
                 switch(method){
                     case(#buildTx(_txi)){
-                        let result = await _local_buildTx(_txi);
-                        return (#Done, ?#This(#buildTx(result)), null);
+                        let result = await* _local_buildTx(_txi);
+                        let resultRaw = Binary.BigEndian.fromNat64(Nat64.fromNat(result.txi));
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     case(#sendTx(_txi, _txid)){
-                        let result = await _local_sendTx(_txi, _txid);
-                        return (#Done, ?#This(#sendTx(result)), null);
+                        let result = await* _local_sendTx(_txi, _txid);
+                        let resultRaw = Binary.BigEndian.fromNat64(Nat64.fromNat(result.txi));
+                        return (#Done, ?#result(?(resultRaw, debug_show(result))), null);
                     };
                     //case(_){return (#Error, null, ?{code=#future(9901); message="Non-local function."; });};
                 };
@@ -433,29 +416,61 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     //     //orderLogs := Tools.arrayAppend(orderLogs, [(_toid, _status)]);
     // };
     // Create saga object
-    private var saga: ?SagaTM.SagaTM = null;
-    private func _getSaga() : SagaTM.SagaTM {
+    private var saga: ?SagaTM.SagaTM<CustomCallType> = null;
+    private func _getSaga() : SagaTM.SagaTM<CustomCallType> {
         switch(saga){
             case(?(_saga)){ return _saga };
             case(_){
-                let _saga = SagaTM.SagaTM(Principal.fromActor(this), ?_local, null, null); //?_taskCallback, ?_orderCallback
+                let _saga = SagaTM.SagaTM<CustomCallType>(Principal.fromActor(this), ?_customCall, null, null); //?_taskCallback, ?_orderCallback
                 saga := ?_saga;
                 return _saga;
             };
         };
     };
-    private func _buildTask(_data: ?Blob, _callee: Principal, _callType: SagaTM.CallType, _preTtid: [SagaTM.Ttid], _cycles: Nat) : SagaTM.PushTaskRequest{
+    private func _ictcSagaRun(_toid: Nat, _forced: Bool): async* (){
+        if (_forced or _checkAsyncMessageLimit()){ 
+            lastSagaRunningTime := Time.now();
+            let saga = _getSaga();
+            if (_toid == 0){
+                try{
+                    countAsyncMessage += 1;
+                    let _sagaRes = await* saga.getActuator().run();
+                    countAsyncMessage -= Nat.min(1, countAsyncMessage);
+                }catch(e){
+                    countAsyncMessage -= Nat.min(1, countAsyncMessage);
+                    throw Error.reject("430: ICTC error: "# Error.message(e)); 
+                };
+            }else{
+                try{
+                    countAsyncMessage += 2;
+                    let _sagaRes = await saga.run(_toid);
+                    countAsyncMessage -= Nat.min(2, countAsyncMessage);
+                }catch(e){
+                    countAsyncMessage -= Nat.min(2, countAsyncMessage);
+                    throw Error.reject("430: ICTC error: "# Error.message(e)); 
+                };
+            };
+        };
+    };
+    private func _buildTask(_data: ?Blob, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtid: [SagaTM.Ttid], _cycles: Nat, _attempts: ?Nat, _interval: ?Int) : SagaTM.PushTaskRequest<CustomCallType>{
         return {
             callee = _callee;
             callType = _callType;
             preTtid = _preTtid;
-            attemptsMax = ?3;
-            recallInterval = ?200000000; // nanoseconds
+            attemptsMax = _attempts;
+            recallInterval = _interval; // nanoseconds
             cycles = _cycles;
             data = _data;
         };
     };
-    private func _noOrderInICTC(): Bool{
+    private func _checkICTCError() : (){
+        let count = _getSaga().getBlockingOrders().size();
+        if (count >= 5){
+            pause := true;
+            ignore _putEvent(#suspend({message = ?"The ICTC transaction reported errors and the system was suspended."}), ?_accountId(Principal.fromActor(this), null));
+        };
+    };
+    private func _ictcAllDone(): Bool{
         let tos = _getSaga().getAliveOrders();
         var res: Bool = true;
         for ((toid, order) in tos.vals()){
@@ -470,33 +485,33 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         };
         return res;
     };
-    private func _checkICTCError() : (){
-        let count = _getSaga().getBlockingOrders().size();
-        if (count >= 5){
-            pause := true;
-            ignore _putEvent(#suspend({message = ?"The ICTC transaction reported errors and the system was suspended."}), ?_accountId(Principal.fromActor(this), null));
-        };
-    };
-    private func _hasOrderInProgress(_toids: [SagaTM.Toid]) : Bool{
-        var inProgress: Bool = false;
+    private func _ictcDone(_toids: [SagaTM.Toid]) : Bool{
+        var completed: Bool = true;
         for (toid in _toids.vals()){
             let status = _getSaga().status(toid);
-            if (status != ?#Done and status != ?#Recovered){
-                inProgress := true;
+            if (status != ?#Done and status != ?#Recovered and status != null){
+                completed := false;
             };
         };
-        return inProgress;
+        return completed;
     };
 
     // Converts a public key to a P2PKH address.
-    private func _public_key_to_p2pkh_address(public_key_bytes : [Nat8]) : Address {
-        let public_key = _public_key_bytes_to_public_key(public_key_bytes);
+    private func _publicKeyToP2PKHAddress(_publicKeyBytes : [Nat8]) : Address {
+        let publicKey = _publicKeyBytesToPublicKey(_publicKeyBytes);
         // Compute the P2PKH address from our public key.
-        P2pkh.deriveAddress(#Mainnet, Publickey.toSec1(public_key, true))
+        P2pkh.deriveAddress(#Mainnet, Publickey.toSec1(publicKey, true))
     };
-    private func _public_key_bytes_to_public_key(public_key_bytes : [Nat8]) : PublicKey {
-        let point = Utils.unwrap(Affine.fromBytes(public_key_bytes, CURVE));
+    private func _publicKeyBytesToPublicKey(_publicKeyBytes : [Nat8]) : PublicKey {
+        let point = Utils.unwrap(Affine.fromBytes(_publicKeyBytes, CURVE));
         Utils.get_ok(Publickey.decode(#point point))
+    };
+    private func _initMinterAddress() : async* (){
+        if (minter_address == ""){
+            let res = await* _fetchAccountAddress(Blob.fromArray([]));
+            minter_public_key := res.0;
+            minter_address := res.1;
+        };
     };
     private func _accountId(_owner: Principal, _subaccount: ?[Nat8]) : Blob{
         return Blob.fromArray(Tools.principalToAccount(_owner, _subaccount));
@@ -523,19 +538,28 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             memo = null;
             created_at_time = null; // nanos
         };
-        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#send({toid = ?toid; to = to; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?toAccountId);
         return toid;
     };
-    private func _mintCkToken(account: Account, userAddress: Text, amount: Nat64) : SagaTM.Toid{
+    private func _mintCkToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
         // mint ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
         let icrc1Account : ICRC1.Account = { owner = account.owner; subaccount = _toSaBlob(account.subaccount); };
         let saga = _getSaga();
-        let toid : Nat = saga.create("mint", #Forward, ?accountId, null);
+        var toid : Nat = 0;
+        switch(optToid){
+            case(?toid_){
+                toid := toid_;
+                saga.open(toid);
+            };
+            case(_){
+                toid := saga.create(Option.get(ictcName, "mint"), #Forward, ?accountId, null);
+            };
+        };
         let args : ICRC1.TransferArgs = {
             from_subaccount = null;
             to = icrc1Account;
@@ -544,19 +568,28 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             memo = ?Text.encodeUtf8(userAddress);
             created_at_time = null; // nanos
         };
-        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#mint({toid = ?toid; account = account; address = userAddress; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
-    private func _burnCkToken(fromSubaccount: Blob, address: Text, amount: Nat64, account: Account) : SagaTM.Toid{
+    private func _burnCkToken(optToid: ?Nat, fromSubaccount: Blob, address: Text, amount: Nat64, account: Account, ictcName: ?Text) : SagaTM.Toid{
         // burn ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
         let saga = _getSaga();
-        let toid : Nat = saga.create("burn", #Forward, ?accountId, null);
+        var toid : Nat = 0;
+        switch(optToid){
+            case(?toid_){
+                toid := toid_;
+                saga.open(toid);
+            };
+            case(_){
+                toid := saga.create(Option.get(ictcName, "burn"), #Forward, ?accountId, null);
+            };
+        };
         let burnArgs : ICRC1.TransferArgs = {
             from_subaccount = ?fromSubaccount;
             to = mainIcrc1Account;
@@ -565,13 +598,13 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             memo = ?Text.encodeUtf8(address);
             created_at_time = null; // nanos
         };
-        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(burnArgs)), [], 0);
-        let ttid = saga.push(toid, task, null, null);
+        let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(burnArgs)), [], 0, null, null);
+        let _ttid = saga.push(toid, task, null, null);
         saga.close(toid);
         ignore _putEvent(#burn({toid = ?toid; account = account; address = address; icTokenCanisterId = ckTokenCanisterId; tokenBlockIndex = 0; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
-    private func _burnCkToken2(_fromSubaccount: Blob, _address: Text, _amount: Nat64, _account: Account) : async* { #Ok: Nat; #Err: ICRC1.TransferError; }{
+    private func _burnCkTokenWithoutIctc(_fromSubaccount: Blob, _address: Text, _amount: Nat64, _account: Account) : async* { #Ok: Nat; #Err: ICRC1.TransferError; }{
         ignore await* _getSaga().getActuator().run();
         let accountId = _accountId(_account.owner, _account.subaccount);
         let mainIcrc1Account : ICRC1.Account = {owner=Principal.fromActor(this); subaccount=null };
@@ -600,7 +633,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (_value >= ckFee*2){
             _subFeeBalance(_value);
             let toid = _sendCkToken(Blob.fromArray(sa_one), _account, Nat64.sub(_value, ckFee));
-            let res = await _getSaga().run(toid);
+            let _res = await _getSaga().run(toid);
         };
     };
 
@@ -608,7 +641,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         var fees : [Nat64] = [];
         try{
             countAsyncMessage += 2;
-            Cycles.add(GET_CURRENT_FEE_PERCENTILES_COST_CYCLES);
+            Cycles.add<system>(GET_CURRENT_FEE_PERCENTILES_COST_CYCLES);
             fees := await ICBTC.get_current_fee_percentiles(NETWORK);
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
         }catch(e){
@@ -622,21 +655,34 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
 
     /// update btc balances
-    private func _fetchAccountAddress(_dpath: DerivationPath) : async* (pubKey: [Nat8], address: Text){
-        var own_public_key : [Nat8] = [];
-        var own_address = "";
-        let ecdsa_public_key = await ic.ecdsa_public_key({
-            canister_id = null;
-            derivation_path = _dpath;
-            key_id = { curve = #secp256k1; name = KEY_NAME }; //dfx_test_key
-        });
-        own_public_key := Blob.toArray(ecdsa_public_key.public_key);
-        own_address := _public_key_to_p2pkh_address(own_public_key);
-        return (own_public_key, own_address);
+    private func _fetchAccountAddress(_a: AccountId) : async* (pubKey: [Nat8], address: Text){
+        var ownPublicKey : [Nat8] = [];
+        var ownAddress = "";
+        var dpath: [Blob] = [_a];
+        if (_a == Blob.fromArray([])){
+            dpath := [];
+        };
+        switch(Trie.get(accountAddresses, keyb(_a), Blob.equal)){
+            case(?(pubKey_, address_)){
+                ownPublicKey := pubKey_;
+                ownAddress := address_;
+            };
+            case(_){
+                let ecdsaPublicKey = await ic.ecdsa_public_key({
+                    canister_id = null;
+                    derivation_path = dpath;
+                    key_id = { curve = #secp256k1; name = KEY_NAME }; //dfx_test_key
+                });
+                ownPublicKey := Blob.toArray(ecdsaPublicKey.public_key);
+                ownAddress := _publicKeyToP2PKHAddress(ownPublicKey);
+                accountAddresses := Trie.put(accountAddresses, keyb(_a), Blob.equal, (ownPublicKey, ownAddress)).0;
+            };
+        };
+        return (ownPublicKey, ownAddress);
     };
     private func _fetchAccountUtxos(_account : ?{owner: Principal; subaccount : ?[Nat8] }): async* (address: Text, amount: Nat64, utxos: [Utxo]){
-        var own_public_key : [Nat8] = [];
-        var own_address = "";
+        var ownPublicKey : [Nat8] = [];
+        var ownAddress = "";
         var dpath : [Blob] = [];
         switch(_account){
             case(?(account)){
@@ -644,9 +690,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 dpath := [accountId];
                 try{
                     countAsyncMessage += 2;
-                    let res = await* _fetchAccountAddress(dpath);
-                    own_public_key := res.0;
-                    own_address := res.1;
+                    let res = await* _fetchAccountAddress(accountId);
+                    ownPublicKey := res.0;
+                    ownAddress := res.1;
                     countAsyncMessage -= Nat.min(2, countAsyncMessage);
                 }catch(e){
                     countAsyncMessage -= Nat.min(2, countAsyncMessage);
@@ -654,70 +700,56 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 };
             };
             case(_){
-                own_public_key := minter_public_key;
-                own_address := minter_address;
-                dpath := [];
+                ownPublicKey := minter_public_key;
+                ownAddress := minter_address;
             };
         };
-        // {
-        //     utxos : [Utxo];
-        //     tip_block_hash : BlockHash;
-        //     tip_height : Nat32;
-        //     next_page : ?Page; // 1000 utxos per Page
-        // }
         var amount : Nat64 = 0;
-        var utxos : [Utxo] = [];
+        var utxos : [Utxo] = []; // BlockHeight DESC
         try {
             countAsyncMessage += 2;
-            Cycles.add(GET_UTXOS_COST_CYCLES);
+            Cycles.add<system>(GET_UTXOS_COST_CYCLES);
             var utxosResponse = await ic.bitcoin_get_utxos({
-                address = own_address;
+                address = ownAddress;
                 network = NETWORK;
                 filter = ?#MinConfirmations(MIN_CONFIRMATIONS); 
             });
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             var isNewUtxos : Bool = false;
-            var utxosRecorded : [Utxo] = [];
-            switch(_getAccountUtxos(own_address)){
-                case(?(item)){ utxosRecorded := item.2 };
-                case(_){};
-            };
-            for (utxo in utxosResponse.utxos.vals()){
-                if (utxosRecorded.size() == 0 or utxo.height > utxosRecorded[0].height){
+            for (utxo in utxosResponse.utxos.vals()){ // utxosResponse.utxos: BlockHeight DESC
+                if (utxo.height > _accountUtxosLatestHeight(ownAddress)){
                     utxos := Tools.arrayAppend(utxos, [utxo]);
-                    amount += utxo.value;
                     isNewUtxos := true;
                 };
             };
-            _addMinterUtxos(own_address, own_public_key, dpath, utxos);
-            _addAccountUtxos(own_address, own_public_key, dpath, utxos);
             label getNextPage while (Option.isSome(utxosResponse.next_page) and isNewUtxos){
-                Cycles.add(GET_UTXOS_COST_CYCLES);
+                Cycles.add<system>(GET_UTXOS_COST_CYCLES);
                 utxosResponse := await ic.bitcoin_get_utxos({
-                    address = own_address;
+                    address = ownAddress;
                     network = NETWORK;
                     filter = ?#Page(Option.get(utxosResponse.next_page, [])); 
                 });
-                switch(_getAccountUtxos(own_address)){
-                    case(?(item)){ utxosRecorded := item.2 };
-                    case(_){};
-                };
                 for (utxo in utxosResponse.utxos.vals()){
-                    if (utxosRecorded.size() == 0 or utxo.height > utxosRecorded[0].height){
-                        _addMinterUtxos(own_address, own_public_key, dpath, [utxo]);
-                        _addAccountUtxos(own_address, own_public_key, dpath, [utxo]);
+                    if (utxo.height > _accountUtxosLatestHeight(ownAddress)){
                         utxos := Tools.arrayAppend(utxos, [utxo]);
-                        amount += utxo.value;
                     }else{
                         break getNextPage;
                     };
+                };
+            };
+            // store utxos
+            for (utxo in Array.reverse(utxos).vals()){
+                if (utxo.height > _accountUtxosLatestHeight(ownAddress)){ // Need to use _accountUtxosLatestHeight() judgement to avoid atomicity issues.
+                    _addMinterUtxos(ownAddress, ownPublicKey, dpath, [utxo]);
+                    _addAccountUtxos(ownAddress, ownPublicKey, dpath, [utxo]);
+                    amount += utxo.value;
                 };
             };
         }catch(e){
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             throw Error.reject("411: Error in bitcoin_get_utxos()!");
         };
-        return (own_address, amount, utxos);
+        return (ownAddress, amount, utxos);
     };
 
     private func _putTxInProcess(_txi: TxIndex) : (){
@@ -817,21 +849,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                     // burn Fee
                     _subFeeBalance(Nat64.fromNat(totalFee));
                     let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                    ignore _burnCkToken(Blob.fromArray(sa_one), "", Nat64.fromNat(totalFee), feetoAccount);
+                    ignore _burnCkToken(?toid, Blob.fromArray(sa_one), "", Nat64.fromNat(totalFee), feetoAccount, ?"burn_fee");
                     // ictc: signs / build - send
-                    let task = _buildTask(?txiBlob, Principal.fromActor(this), #This(#buildTx(txi)), [], 0);
-                    let ttid = saga.push(toid, task, null, null);
+                    let task = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#buildTx(txi)), [], 0, null, null);
+                    let _ttid = saga.push(toid, task, null, null);
                     saga.close(toid);
                     // let sagaRes = await saga.run(toid);
                     if (toid > 0 and _asyncMessageSize() < 360){ 
                         lastSagaRunningTime := Time.now();
-                        try{
-                            countAsyncMessage += 2;
-                            let sagaRes = await saga.run(toid);
-                            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-                        }catch(e){
-                            countAsyncMessage -= Nat.min(2, countAsyncMessage); 
-                        };
+                        await* _ictcSagaRun(toid, false);
                     }; 
                 }else {
                     switch(tx.status){
@@ -848,8 +874,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             case(_){};
         };
     };
-    private func _reSendBtc(_txIndex: Nat, _fee: Nat) : async* (){
-        // Only for gov
+    // Notice: (1) For governance calls only. (2) If fee is increased, the increase needs to be less than the change balance.
+    private func _reSendBtc(_txIndex: Nat, _fee: Nat) : async* (){ // retrieve governance
         let txi = _txIndex;
         switch(Trie.get(sendingBTC, keyn(txi), Nat.equal)){
             case(?(tx)){
@@ -865,31 +891,22 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                         // reset fee
                         //let (txTest, feeTest) = _buildTxTest(dsts);
                         let totalFee = _fee; 
-                        // build
-                        // let (transaction, spendUtxos, totalInput, totalSpend, remainingUtxos) = 
-                        // Utils.get_ok_except(_buildTransaction(2, _utxos, dsts, Nat64.fromNat(totalFee)), "Error building transaction.");
                         ignore _updateSendingBtc(txi, null, ?Nat64.fromNat(totalFee), null, ?#Signing, [toid], null);
                         // burn Fee
                         if (Nat64.fromNat(totalFee) > tx.fee){
                             let burningFee = Nat64.sub(Nat64.fromNat(totalFee), tx.fee);
                             _subFeeBalance(burningFee);
                             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                            ignore _burnCkToken(Blob.fromArray(sa_one), "", burningFee, feetoAccount);
+                            ignore _burnCkToken(?toid, Blob.fromArray(sa_one), "", burningFee, feetoAccount, ?"burn_fee");
                         };
                         // ictc: signs / build - send
-                        let task = _buildTask(?txiBlob, Principal.fromActor(this), #This(#buildTx(txi)), [], 0);
-                        let ttid = saga.push(toid, task, null, null);
+                        let task = _buildTask(?txiBlob, Principal.fromActor(this), #custom(#buildTx(txi)), [], 0, null, null);
+                        let _ttid = saga.push(toid, task, null, null);
                         saga.close(toid);
                         // let sagaRes = await saga.run(toid);
                         if (toid > 0 and _asyncMessageSize() < 360){ 
                             lastSagaRunningTime := Time.now();
-                            try{
-                                countAsyncMessage += 2;
-                                let sagaRes = await saga.run(toid);
-                                countAsyncMessage -= Nat.min(2, countAsyncMessage);
-                            }catch(e){
-                                countAsyncMessage -= Nat.min(2, countAsyncMessage); 
-                            };
+                            await* _ictcSagaRun(toid, false);
                         }; 
                     };
                     case(_){};
@@ -905,7 +922,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             switch (Address.scriptPubKey(#p2pkh(vUtxos[i].0))) {
                 case (#ok(scriptPubKey)) {
                     // Obtain scriptSigs for each Tx input.
-                    let sighash = transaction.createSignatureHash(scriptPubKey, Nat32.fromIntWrap(i), SIGHASH_ALL);
+                    // let sighash = transaction.createSignatureHash(scriptPubKey, Nat32.fromIntWrap(i), SIGHASH_ALL);
                     let signature_sec = Blob.fromArray(Array.freeze(Array.init<Nat8>(64, 255))); // Test
                     let signature_der = Blob.toArray(Der.encodeSignature(signature_sec));
                     // Append the sighash type.
@@ -933,48 +950,46 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         };
         transaction.toBytes()
     };
-    private func _buildTxTest(
-        destinations: [(TypeAddress, Satoshi)]
-        ) : (tx: [Nat8], totalFee: Nat){ 
-        let fee_per_byte_nat = Nat64.toNat(btcFee);
-        var total_fee : Nat = 0;
+    private func _buildTxTest(destinations: [(TypeAddress, Satoshi)]) : (tx: [Nat8], totalFee: Nat){ 
+        let feePerByte: Nat = Nat64.toNat(btcFee);
+        var totalFee : Nat = 0;
         loop {
             let (transaction, spendUtxos, totalInput, totalSpend, remainingUtxos) = 
-            Utils.get_ok_except(_buildTransaction(2, minterUtxos, destinations, Nat64.fromNat(total_fee)), "Error building transaction.");
+            Utils.get_ok_except(_buildTransaction(2, minterUtxos, destinations, Nat64.fromNat(totalFee)), "Error building transaction.");
             // Sign the transaction. In this case, we only care about the size of the signed transaction, so we use a mock signer here for efficiency.
-            let signed_transaction_bytes = _signTxTest(transaction, spendUtxos);
-            let signed_tx_bytes_len : Nat = signed_transaction_bytes.size();
-            if((signed_tx_bytes_len * fee_per_byte_nat) / 1000 == total_fee) {
-                Debug.print("Transaction built with fee " # debug_show(total_fee));
-                return (transaction.toBytes(), total_fee);
+            let signedTxnBytes = _signTxTest(transaction, spendUtxos);
+            let signedTxnLen : Nat = signedTxnBytes.size();
+            if((signedTxnLen * feePerByte) / 1000 == totalFee) {
+                Debug.print("Transaction built with fee " # debug_show(totalFee));
+                return (transaction.toBytes(), totalFee);
             } else {
-                total_fee := (signed_tx_bytes_len * fee_per_byte_nat) / 1000;
+                totalFee := (signedTxnLen * feePerByte) / 1000;
             }
         };
     };
     /// build tx
     private func _buildSignedTx(
         txi: Nat, 
-        own_utxos: [VaultUtxo], // -> Deque.Deque<VaultUtxo>
+        ownUtxos: [VaultUtxo], // -> Deque.Deque<VaultUtxo>
         destinations: [(Nat64, Address, Satoshi)], // -> [(TypeAddress, Satoshi)]
         fee: Nat64
         ) : async* {tx: [Nat8]; txid: [Nat8]} { 
-        var _utxos : Deque.Deque<VaultUtxo> = Deque.empty();
-        var _destinations : [(TypeAddress, Satoshi)] = [];
-        for (utxo in own_utxos.vals()){
+        var utxos : Deque.Deque<VaultUtxo> = Deque.empty();
+        var txDestinations : [(TypeAddress, Satoshi)] = [];
+        for (utxo in ownUtxos.vals()){
             var dpath = utxo.2;
             if (utxo.0 == minter_address){ // fix bug
                 dpath := [];
             };
-            _utxos := Deque.pushFront(_utxos, (utxo.0, utxo.1, dpath, utxo.3));
+            utxos := Deque.pushFront(utxos, (utxo.0, utxo.1, dpath, utxo.3));
         };
-        _destinations := Array.map<(Nat64, Address, Satoshi), (TypeAddress, Satoshi)>(destinations, func (t: (Nat64, Address, Satoshi)): (TypeAddress, Satoshi){
+        txDestinations := Array.map<(Nat64, Address, Satoshi), (TypeAddress, Satoshi)>(destinations, func (t: (Nat64, Address, Satoshi)): (TypeAddress, Satoshi){
             (#p2pkh(t.1), t.2)
         });
         let (transaction, spendUtxos, totalInput, totalSpend, remainingUtxos) = 
-        Utils.get_ok_except(_buildTransaction(2, _utxos, _destinations, fee), "414: Error building transaction.");
-        let signed_transaction_bytes = await* _signTx(txi, transaction, spendUtxos);
-        return {tx = signed_transaction_bytes; txid = transaction.id() };
+        Utils.get_ok_except(_buildTransaction(2, utxos, txDestinations, fee), "414: Error building transaction.");
+        let signedTxnBytes = await* _signTx(txi, transaction, spendUtxos);
+        return {tx = signedTxnBytes; txid = transaction.id() };
     };
     /// sign transaction
     private func _signTx(txi: Nat, transaction: Transaction, vUtxos: [VaultUtxo]) : async* [Nat8] { // key_name
@@ -987,7 +1002,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                     // Obtain scriptSigs for each Tx input.
                     let sighash = transaction.createSignatureHash(scriptPubKey, Nat32.fromIntWrap(i), SIGHASH_ALL);
                     //let signature_sec = await signer(KEY_NAME, vUtxos[i].2, Blob.fromArray(sighash));
-                    Cycles.add(ECDSA_SIGN_CYCLES);
+                    Cycles.add<system>(ECDSA_SIGN_CYCLES);
                     let res = await ic.sign_with_ecdsa({
                         message_hash = Blob.fromArray(sighash);
                         derivation_path = vUtxos[i].2;
@@ -1080,23 +1095,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 case(_){ return #err("Insufficient balance"); };
             };
         };
-        // sort
-        // vUtxos.sort(func (x:VaultUtxo, y:VaultUtxo): Order.Order{
-        //     Nat64.compare(x.3.value, y.3.value)
-        // });
-        // filter
-        // var i: Nat = 0;
-        // let vUtxos2 = Buffer.clone(vUtxos);
-        // for ((address, pubKey, dpath, utxo) in vUtxos.vals()){
-        //     if (availableFunds - utxo.value >= totalSpend){
-        //         utxos := Deque.pushFront(utxos, (address, pubKey, dpath, utxo));
-        //         availableFunds -= utxo.value;
-        //         let v = vUtxos2.remove(i);
-        //     }else{
-        //         txInputs.add(TxInput.TxInput(utxo.outpoint, defaultSequence));
-        //         i += 1;
-        //     };
-        // };
         // If there is remaining amount that is worth considering then include a change TxOutput.
         let remainingAmount : Satoshi = availableFunds - totalSpend;
         if (remainingAmount > dustThreshold) {
@@ -1127,10 +1125,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     private func _sendTxs() : async* (){
         for(txi in txInProcess.vals()){
             try{
-                if (txi == txIndex and Time.now() > lastTxTime + 600*ns_){
+                if (txi == txIndex and Time.now() > lastTxTime + SEND_TXN_INTERVAL * ns_){
                     lastTxTime := Time.now();
-                    await* _sendBtc(?txi);
                     txIndex += 1;
+                    await* _sendBtc(?txi);
                 }else{
                     await* _sendBtc(?txi);
                 };
@@ -1139,20 +1137,18 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
 
     private func _reconciliation() : async* (){
-        _checkICTCError();
-        let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
-        let feetoAccount = {owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_one) };
-        let mainAddress = minter_address;
-        let nativeBalance = Nat64.toNat(minterRemainingBalance);
-        let ckLedger = icBTC;
-        let ckTotalSupply = await ckLedger.icrc1_total_supply();
-        let ckFeeBalance = await ckLedger.icrc1_balance_of(feetoAccount);
-        let minterBalance = Nat64.toNat(totalBtcReceiving - totalBtcSent);
-        let minterFeeBalance = Nat64.toNat(feeBalance); 
         // nativeBalance >= minterBalance
         // nativeBalance >= ckTotalSupply
         // minterBalance >= ckTotalSupply - ckFeeBalance
-        if (not(app_debug) and _noOrderInICTC() and (nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100)){ /*config*/
+        _checkICTCError();
+        await* _initMinterAddress();
+        let nativeBalance = Nat64.toNat(minterRemainingBalance);
+        let ckLedger = icBTC;
+        let ckTotalSupply = await ckLedger.icrc1_total_supply();
+        // let ckFeeBalance = await ckLedger.icrc1_balance_of(feetoAccount);
+        let minterBalance = Nat64.toNat(totalBtcReceiving - totalBtcSent);
+        // let minterFeeBalance = Nat64.toNat(feeBalance); 
+        if (not(app_debug) and _ictcAllDone() and (nativeBalance < minterBalance * 98 / 100 or nativeBalance < ckTotalSupply * 95 / 100)){ /*config*/
             pause := true;
             ignore _putEvent(#suspend({message = ?"The pool account balance does not match and the system is suspended and pending DAO processing."}), ?_accountId(Principal.fromActor(this), null));
         };
@@ -1162,25 +1158,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public shared(msg) func get_btc_address(_account : Account): async Text{
         assert(_notPaused() or _onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
-        var own_public_key : [Nat8] = [];
-        try{
-            countAsyncMessage += 2;
-            let ecdsa_public_key = await ic.ecdsa_public_key({
-                canister_id = null;
-                derivation_path = [ accountId ];
-                key_id = { curve = #secp256k1; name = KEY_NAME }; //dfx_test_key
-            });
-            own_public_key := Blob.toArray(ecdsa_public_key.public_key);
-            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-        }catch(e){
-            countAsyncMessage -= Nat.min(2, countAsyncMessage); 
-        };
-        let own_address = _public_key_to_p2pkh_address(own_public_key);
-        return own_address
-        // // Fetch the public key of the given derivation path.
-        // let public_key = await EcdsaApi.ecdsa_public_key(key_name, Array.map(derivation_path, Blob.fromArray));
-        // // Compute the address.
-        // public_key_to_p2pkh_address(network, Blob.toArray(public_key))
+        let (pubKey, address) = await* _fetchAccountAddress(accountId);
+        return address;
     };
     
     public shared(msg) func update_balance(_account : Account): async {
@@ -1192,11 +1171,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
         };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
+        };
+        await* _initMinterAddress();
         let __start = Time.now();
         let accountId = _accountId(_account.owner, _account.subaccount);
-        let icrc1Account : ICRC1.Account = { owner = _account.owner; subaccount = _toSaBlob(_account.subaccount); };
         let account : Minter.Account = _account;
-        var own_address : Text = "";
+        var ownAddress : Text = "";
         if (not(_checkAsyncMessageLimit())){
             countRejections += 1; 
             return #Err(#TemporarilyUnavailable("405: IC network is busy, please try again later.")); 
@@ -1204,63 +1187,56 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({error_code = 400; error_message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
-        // latestVisitTime := Trie.put(latestVisitTime, keyp(msg.caller), Principal.equal, _now()).0;
+        if (not(_dosCheck(accountId, 10)) or not(_dosCheck(_accountId(msg.caller, null), 10))){
+            return #Err(#GenericError({error_code = 400; error_message = "400: The network is busy, please try again later!"}))
+        };
         _setLatestVisitTime(msg.caller);
-        // {
-        //     utxos : [Utxo];
-        //     tip_block_hash : BlockHash;
-        //     tip_height : Nat32;
-        //     next_page : ?Page; // 1000 utxos per Page
-        // }
         var amount : Nat64 = 0;
         var utxos : [Utxo] = [];
         try {
             countAsyncMessage += 2;
             let res = await* _fetchAccountUtxos(?account);
-            own_address := res.0;
+            ownAddress := res.0;
             amount := res.1;
             utxos := res.2;
-            _putAddressAccount(own_address, account);
+            _putAddressAccount(ownAddress, account);
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
         }catch(e){
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             return #Err(#TemporarilyUnavailable(Error.message(e)))
         };
-        if (utxos.size() > 0){
+        if (utxos.size() > 0 and amount > Nat64.fromNat(ckFixedFee)){
             // mint icBTC
             let fixedFee = Nat64.fromNat(ckFixedFee);
             let value = Nat64.sub(amount, fixedFee);
             let saga = _getSaga();
-            let toid = _mintCkToken(account, own_address, value);
+            let toid = _mintCkToken(null, account, ownAddress, value, null);
             // mint Fee 
             _addFeeBalance(fixedFee);
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintCkToken(feetoAccount, "", fixedFee);
+            if (fixedFee > 0){
+                ignore _mintCkToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
+            };
             totalBtcFee += fixedFee;
             totalBtcReceiving += value;
             // record event
-            let event : Minter.Event = #received_utxos({to_account  = account; deposit_address = own_address; total_fee = Nat64.toNat(fixedFee); amount = Nat64.toNat(value); utxos = _toUtxosArr(utxos) });
+            let event : Minter.Event = #received_utxos({to_account  = account; deposit_address = ownAddress; total_fee = Nat64.toNat(fixedFee); amount = Nat64.toNat(value); utxos = _toUtxosArr(utxos) });
             let thisBlockIndex = _putEvent(event, ?_accountId(account.owner, account.subaccount));
-            // blockEvents := Trie.put(blockEvents, keyn(Nat64.toNat(blockIndex)), Nat.equal, event).0;
+            lastExecutionDuration := Time.now() - __start;
+            if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
             // let sagaRes = await saga.run(toid);
             if (toid > 0 and _asyncMessageSize() < 360){ 
                 lastSagaRunningTime := Time.now();
-                try{
-                    countAsyncMessage += 2;
-                    let sagaRes = await saga.run(toid);
-                    countAsyncMessage -= Nat.min(2, countAsyncMessage);
-                }catch(e){
-                    countAsyncMessage -= Nat.min(2, countAsyncMessage); 
-                };
+                await* _ictcSagaRun(toid, false);
             }; 
-            lastExecutionDuration := Time.now() - __start;
-            if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
             return #Ok({ block_index = Nat64.fromNat(thisBlockIndex); amount = value });
+        }else if (utxos.size() > 0 and amount <= Nat64.fromNat(ckFixedFee)){
+            return #Err(#GenericError({ error_message = "Amount below "# Nat.toText(ckFixedFee) #" will be ignored (discarded)"; error_code = 418 }));
         }else{
             return #Err(#NoNewUtxos);
         };
     };
-    // icrc1_transfer '(record{from_subaccount=null;to=record{owner=principal ""; subaccount= };amount= ;fee=null;memo=null;created_at_time=null})'
+    
     public query func get_withdrawal_account(_account : Account) : async Minter.Account{
         let accountId = _accountId(_account.owner, _account.subaccount);
         return {owner=Principal.fromActor(this); subaccount=?Blob.toArray(accountId)};
@@ -1273,12 +1249,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
         };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
+        };
         if (Array.size(txInProcess) > 50){
             return #Err(#GenericError({error_code = 401; error_message = "401: Too many transactions waiting to be processed, please try again later."}))
         };
         let accountId = _accountId(msg.caller, _sa);
         let account : Minter.Account = { owner = msg.caller; subaccount = _sa; };
-        let icrc1Account : ICRC1.Account = { owner = msg.caller; subaccount = _toSaBlob(_sa); };
         let retrieveAccount : Minter.Account = { owner = Principal.fromActor(this); subaccount = ?Blob.toArray(accountId); };
         let retrieveIcrc1Account: ICRC1.Account = {owner = Principal.fromActor(this); subaccount = ?accountId};
         if (not(_checkAsyncMessageLimit())){
@@ -1288,7 +1267,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({error_code = 400; error_message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
-        // latestVisitTime := Trie.put(latestVisitTime, keyp(msg.caller), Principal.equal, _now()).0;
+        if (not(_dosCheck(accountId, 10)) or not(_dosCheck(_accountId(msg.caller, null), 10))){
+            return #Err(#GenericError({error_code = 400; error_message = "400: The network is busy, please try again later!"}))
+        };
         _setLatestVisitTime(msg.caller);
         //update fee
         if (Time.now() > lastUpdateFeeTime + 4*3600*ns_){
@@ -1298,27 +1279,24 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 icBTCFee := await icBTC.icrc1_fee();
             };
         };
+        let fee = Nat64.fromNat(ckFixedFee) + btcFee * AVG_TX_BYTES / 1000;
         // fetch minter_address
-        if (minter_address == ""){
-            let res = await* _fetchAccountAddress([]);
-            minter_public_key := res.0;
-            minter_address := res.1;
-        };
+        await* _initMinterAddress();
         //update minter otxos
-        if (args.amount >= minterRemainingBalance * 9 / 10 or Time.now() > lastFetchUtxosTime + 4*3600*ns_){
+        if (args.amount + fee >= minterRemainingBalance or Time.now() > lastFetchUtxosTime + 4*3600*ns_){
             lastFetchUtxosTime := Time.now();
             ignore await* _fetchAccountUtxos(null);
         };
         //MalformedAddress
         switch(Address.scriptPubKey(#p2pkh(args.address))){
-            case(#ok(pub_key)){};
+            case(#ok(pubKey)){};
             case(#err(msg)){
                 return #Err(#MalformedAddress(msg));
             };
         };
         //AmountTooLow
-        if (args.amount < Nat64.max(BTC_MIN_AMOUNT, btcFee * AVG_TX_BYTES / 1000)){
-            return #Err(#AmountTooLow(Nat64.max(BTC_MIN_AMOUNT, btcFee * AVG_TX_BYTES / 1000)));
+        if (args.amount < Nat64.max(BTC_MIN_AMOUNT, fee)){
+            return #Err(#AmountTooLow(Nat64.max(BTC_MIN_AMOUNT, fee)));
         };
         let balance = await icBTC.icrc1_balance_of(retrieveIcrc1Account);
         //InsufficientFunds
@@ -1330,11 +1308,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             return #Err(#TemporarilyUnavailable("Please try again later as some BTC balance of the smart contract is in unconfirmed status."));
         };
         //burn
-        switch(await* _burnCkToken2(accountId, args.address, args.amount, account)){
+        switch(await* _burnCkTokenWithoutIctc(accountId, args.address, args.amount, account)){
             case(#Ok(height)){
-                let fixedFee = ckFixedFee;
-                let fee = Nat64.fromNat(fixedFee) + btcFee * AVG_TX_BYTES / 1000;
-                let value = args.amount - fee; // Satoshi
+                let value = Nat64.sub(args.amount, fee); // Satoshi
                 totalBtcFee += fee;
                 totalBtcSent += args.amount;
                 let thisTxIndex = txIndex;
@@ -1349,7 +1325,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                 // mint Fee
                 _addFeeBalance(fee);
                 let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                ignore _mintCkToken(feetoAccount, "", fee);
+                let toid = _mintCkToken(null, feetoAccount, "", fee, ?"mint_fee");
                 // record event
                 let event : Minter.Event = #accepted_retrieve_btc_request({
                     txi = thisTxIndex;
@@ -1360,13 +1336,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
                     total_fee = Nat64.toNat(fee);
                 });
                 let thisBlockIndex = _putEvent(event, ?_accountId(account.owner, account.subaccount));
-                // blockEvents := Trie.put(blockEvents, keyn(Nat64.toNat(blockIndex)), Nat.equal, event).0;
                 retrieveBTC := Trie.put(retrieveBTC, keyn(thisBlockIndex), Nat.equal, status).0;
                 _pushSendingBtc(thisTxIndex, Nat64.fromNat(thisBlockIndex), args.address, value);
-                if (Time.now() > lastTxTime + 600*ns_){
+                if (Time.now() > lastTxTime + SEND_TXN_INTERVAL * ns_){ // Batch send. 
                     lastTxTime := Time.now();
-                    await* _sendBtc(?thisTxIndex);
                     txIndex += 1;
+                    await* _sendBtc(?thisTxIndex);
                 };
                 return #Ok({block_index = Nat64.fromNat(thisBlockIndex) });
             };
@@ -1384,12 +1359,17 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
         };
+        if (not(_checkCycles())){
+            countRejections += 1; 
+            throw Error.reject("402: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
+        };
         let txi = Option.get(_txIndex, txIndex);
         if (txi == txIndex and _isWaitingToSendBTC(_txIndex)){
-            if (Time.now() > lastTxTime + 600*ns_){
+            if (Time.now() > lastTxTime + SEND_TXN_INTERVAL * ns_){
                 lastTxTime := Time.now();
-                await* _sendBtc(?txIndex);
+                let thisTxIndex = txIndex;
                 txIndex += 1;
+                await* _sendBtc(?thisTxIndex);
                 return true;
             };
         }else if (_isWaitingToSendBTC(_txIndex)){
@@ -1400,7 +1380,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
                 return false;
             };
-            // latestVisitTime := Trie.put(latestVisitTime, keyp(msg.caller), Principal.equal, _now()).0;
             _setLatestVisitTime(msg.caller);
             await* _sendBtc(_txIndex);
             return true;
@@ -1435,7 +1414,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public query func retrieval_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<EventBlockHeight, Minter.RetrieveStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
-        return ICEvents.trieItems2<Minter.RetrieveStatus>(retrieveBTC, 0, eventBlockIndex, page, size);
+        return ICEvents.trieItems2<Minter.RetrieveStatus>(retrieveBTC, firstBlockIndex, eventBlockIndex, page, size);
     };
     public query func sending_log(_txIndex : ?Nat) : async ?Minter.SendingBtcStatus{
         let txIndex_ = Option.get(_txIndex, txIndex);
@@ -1449,7 +1428,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public query func sending_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<TxIndex, Minter.SendingBtcStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
-        return ICEvents.trieItems2<Minter.SendingBtcStatus>(sendingBTC, 0, txIndex, page, size);
+        return ICEvents.trieItems2<Minter.SendingBtcStatus>(sendingBTC, firstTxIndex, txIndex, page, size);
     };
 
     public query func utxos(_address: Address) : async ?(PubKey, DerivationPath, [Utxo]){
@@ -1457,10 +1436,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
     public query func vaultUtxos() : async (Nat64, [(Address, PubKey, DerivationPath, Utxo)]){
         return (minterRemainingBalance, List.toArray(List.append(minterUtxos.0, List.reverse(minterUtxos.1))));
-    };
-    
-    public query func get_events_old_version(args: { start : Nat64; length : Nat64 }) : async [EventOldVerson]{
-        return _getEvents(args.start, args.length);
     };
 
     public query func stats() : async {
@@ -1553,20 +1528,33 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             ignore _putEvent(#start({message = ?"Starting from DAO"}), ?_accountId(owner, null));
         };
         return true;
-    };
+    }; 
     public shared(msg) func clearEvents(_clearFrom: EventBlockHeight, _clearTo: EventBlockHeight): async (){
         assert(_onlyOwner(msg.caller));
         assert(_clearTo >= _clearFrom);
+        // icEvents
         icEvents := ICEvents.clearEvents<Event>(icEvents, _clearFrom, _clearTo);
+        // retrieveBTC
+        for (i in Iter.range(_clearFrom, _clearTo)){
+            retrieveBTC := Trie.remove(retrieveBTC, keyn(i), Nat.equal).0;
+        };
         firstBlockIndex := _clearTo + 1;
+    };
+    public shared(msg) func clearSendingTxs(_clearFrom: TxIndex, _clearTo: TxIndex): async (){
+        assert(_onlyOwner(msg.caller));
+        assert(_clearTo >= _clearFrom);
+        // sendingBTC
+        for (i in Iter.range(_clearFrom, _clearTo)){
+            sendingBTC := Trie.remove(sendingBTC, keyn(i), Nat.equal).0;
+        };
+        firstTxIndex := _clearTo + 1;
     };
     public shared(msg) func updateMinterBalance(_surplusToFee: Bool) : async {pre: Minter.BalanceStats; post: Minter.BalanceStats; shortfall: Nat}{
         // Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of block confirmations before calling this function after suspending the contract operation.
         assert(_onlyOwner(msg.caller));
-        assert(_noOrderInICTC());
-        let mainAccount = {owner = Principal.fromActor(this); subaccount = null };
+        assert(_ictcAllDone());
+        await* _initMinterAddress();
         let feetoAccount = {owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_one) };
-        let mainAddress = minter_address;
         let nativeBalance = Nat64.toNat(minterRemainingBalance);
         let ckLedger = icBTC;
         var ckTotalSupply = await ckLedger.icrc1_total_supply();
@@ -1579,7 +1567,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             ckTotalSupply += value;
             ckFeetoBalance += value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintCkToken(feetoAccount, "", Nat64.fromNat(value));
+            ignore _mintCkToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
         }else if (ckTotalSupply > nativeBalance){
             var value = Nat.sub(ckTotalSupply, nativeBalance);
             if (value > ckFeetoBalance){ 
@@ -1589,24 +1577,23 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             ckTotalSupply -= value;
             ckFeetoBalance -= value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _burnCkToken(Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount);
+            ignore _burnCkToken(null, Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount, ?"burn_rebalance");
         };
         feeBalance := Nat64.fromNat(ckFeetoBalance);
         let postBalance = {nativeBalance = nativeBalance; totalSupply = ckTotalSupply; minterBalance = minterBalance; feeBalance = ckFeetoBalance};
-        let f = _getSaga().run(0);
+        let _f = _getSaga().run(0);
         return {pre = preBalance; post = postBalance; shortfall = shortfall};
     };
     public shared(msg) func allocateRewards(_account: Account, _value: Nat, _sendAllBalance: Bool) : async Bool{ 
         assert(_onlyOwner(msg.caller));
-        let accountId = _accountId(_account.owner, _account.subaccount);
-        let value = _value; // TODO: if (_sendAllBalance) { += keeper.balance }
+        let value = _value; 
         await* _sendFromFeeBalance(_account, Nat64.fromNat(value));
         return true;
     };
 
     public shared(msg) func debug_get_utxos(_address: Address) : async ICBTC.GetUtxosResponse{
         assert(_onlyOwner(msg.caller));
-        Cycles.add(GET_UTXOS_COST_CYCLES);
+        Cycles.add<system>(GET_UTXOS_COST_CYCLES);
         return await ic.bitcoin_get_utxos({
             address = _address;
             network = NETWORK;
@@ -1626,7 +1613,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
     public shared(msg) func debug_charge_address(): async Text{
         assert(_onlyOwner(msg.caller));
-        let res = await* _fetchAccountAddress([]);
+        let res = await* _fetchAccountAddress(Blob.fromArray([]));
         return res.1;
     };
     // public shared(msg) func debug_send(dst: Text, amount: Nat64) : async Text{
@@ -1656,7 +1643,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
     public shared(msg) func setCkTokenWasm(_wasm: Blob, _version: Text) : async (){
         assert(_onlyOwner(msg.caller));
-        assert(_version != _getLatestIcrc1Wasm().1);
+        assert(Option.isNull(Array.find(icrc1WasmHistory, func (t: ([Nat8], Text)): Bool{ _version == t.1 })));
         icrc1WasmHistory := Tools.arrayAppend([(Blob.toArray(_wasm), _version)], icrc1WasmHistory);
         if (icrc1WasmHistory.size() > 32){
             icrc1WasmHistory := Tools.slice(icrc1WasmHistory, 0, ?31);
@@ -1669,8 +1656,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     };
     public query func getCkTokenWasmHistory(): async [(Text, Nat)]{
         return Array.map<([Nat8], Text), (Text, Nat)>(icrc1WasmHistory, func (t: ([Nat8], Text)): (Text, Nat){
-            let wasm = _getLatestIcrc1Wasm();
-            return (wasm.1, wasm.0.size());
+            return (t.1, t.0.size());
         });
     };
     public shared(msg) func launchToken(_args: {
@@ -1683,9 +1669,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         assert(_onlyOwner(msg.caller));
         let wasm = _getLatestIcrc1Wasm();
         assert(wasm.0.size() > 0);
-        let account = {owner = Principal.fromActor(this); subaccount = null };
         let ic: IC.Self = actor("aaaaa-aa");
-        Cycles.add(INIT_CKTOKEN_CYCLES);
+        Cycles.add<system>(INIT_CKTOKEN_CYCLES);
         let newCanister = await ic.create_canister({ settings = ?{
             freezing_threshold = null;
             controllers = ?[Principal.fromActor(this), Principal.fromText(blackhole_)];
@@ -1896,28 +1881,28 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     public query func ictc_getTOCount() : async Nat{
         return _getSaga().count();
     };
-    public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order{
+    public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order<CustomCallType>{
         return _getSaga().getOrder(_toid);
     };
-    public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order)]; totalPage: Nat; total: Nat}{
+    public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getOrders(_page, _size);
     };
-    public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order)]{
+    public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order<CustomCallType>)]{
         return _getSaga().getAliveOrders();
     };
-    public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent{
+    public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent<CustomCallType>{
         return _getSaga().getActuator().getTaskEvent(_ttid);
     };
-    public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent]{
+    public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent<CustomCallType>]{
         return _getSaga().getTaskEvents(_toid);
     };
-    public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent)]; totalPage: Nat; total: Nat}{
+    public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getTaskEvents(_page, _size);
     };
-    public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task)]{
+    public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task<CustomCallType>)]{
         let pool = _getSaga().getActuator().getTaskPool();
-        let arr = Array.map<(SagaTM.Ttid, SagaTM.Task), (SagaTM.Ttid, SagaTM.Task)>(pool, 
-        func (item:(SagaTM.Ttid, SagaTM.Task)): (SagaTM.Ttid, SagaTM.Task){
+        let arr = Array.map<(SagaTM.Ttid, SagaTM.Task<CustomCallType>), (SagaTM.Ttid, SagaTM.Task<CustomCallType>)>(pool, 
+        func (item:(SagaTM.Ttid, SagaTM.Task<CustomCallType>)): (SagaTM.Ttid, SagaTM.Task<CustomCallType>){
             (item.0, item.1);
         });
         return arr;
@@ -1953,13 +1938,13 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     //     saga.close(_toid);
     //     return ttid;
     // };
-    public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
+    public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
         // Governance or manual compensation (operation allowed only when a transaction order is in blocking status).
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         assert(_onlyBlocking(_toid));
         let saga = _getSaga();
         saga.open(_toid);
-        let taskRequest = _buildTask(_businessId, _callee, _callType, _preTtids, GET_UTXOS_COST_CYCLES);
+        let taskRequest = _buildTask(_businessId, _callee, _callType, _preTtids, GET_UTXOS_COST_CYCLES, null, null);
         //let ttid = saga.append(_toid, taskRequest, null, null);
         let ttid = saga.appendComp(_toid, Option.get(_forTtid, 0), taskRequest, null);
         return ttid;
@@ -1970,14 +1955,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         let saga = _getSaga();
         let ttid = saga.redo(_toid, _ttid);
-        try{
-            countAsyncMessage += 2;
-            let r = await saga.run(_toid);
-            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-        }catch(e){
-            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-            throw Error.reject("430: ICTC error: "# Error.message(e)); 
-        };
+        await* _ictcSagaRun(_toid, true);
         return ttid;
     };
     /// set status of pending task
@@ -2018,14 +1996,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         assert(_onlyBlocking(_toid));
         let saga = _getSaga();
         saga.close(_toid);
-        try{
-            countAsyncMessage += 2;
-            let r = await saga.run(_toid);
-            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-        }catch(e){
-            countAsyncMessage -= Nat.min(2, countAsyncMessage);
-            throw Error.reject("430: ICTC error: "# Error.message(e)); 
-        };
+        await* _ictcSagaRun(_toid, true);
         try{
             countAsyncMessage += 2;
             let r = await* _getSaga().complete(_toid, _status);
@@ -2056,27 +2027,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
         if (not(_checkAsyncMessageLimit())){
             throw Error.reject("405: IC network is busy, please try again later."); 
         };
-        // _sessionPush(msg.caller);
         let saga = _getSaga();
         if (_onlyOwner(msg.caller)){
-            try{
-                countAsyncMessage += 3;
-                let res = await* saga.getActuator().run();
-                countAsyncMessage -= Nat.min(3, countAsyncMessage);
-            }catch(e){
-                countAsyncMessage -= Nat.min(3, countAsyncMessage);
-                throw Error.reject("430: ICTC error: "# Error.message(e)); 
-            };
+            await* _ictcSagaRun(0, true);
         } else if (Time.now() > lastSagaRunningTime + ICTC_RUN_INTERVAL*ns_){ 
-            lastSagaRunningTime := Time.now();
-            try{
-                countAsyncMessage += 3;
-                let sagaRes = await saga.run(0);
-                countAsyncMessage -= Nat.min(3, countAsyncMessage);
-            }catch(e){
-                countAsyncMessage -= Nat.min(3, countAsyncMessage);
-                throw Error.reject("430: ICTC error: "# Error.message(e)); 
-            };
+            await* _ictcSagaRun(0, false);
         };
         return true;
     };
@@ -2107,7 +2062,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     // receive cycles
     public func wallet_receive(): async (){
         let amout = Cycles.available();
-        let accepted = Cycles.accept(amout);
+        let _accepted = Cycles.accept<system>(amout);
     };
     /// timer tick
     // public shared(msg) func timer_tick(): async (){
@@ -2116,21 +2071,24 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     //
 
     private func timerLoop() : async (){
-        if (_now() > lastMonitorTime + 2 * 24 * 3600){
+        if (_now() > lastMonitorTime + 24 * 3600){
             if (Trie.size(cyclesMonitor) == 0){
                 cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, icBTC_);
             };
-            cyclesMonitor := await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, 1000000000000 / (if (app_debug) {2} else {1}), 1000000000000 * 10, 0);
+            let monitor = await* CyclesMonitor.monitor(Principal.fromActor(this), cyclesMonitor, 1000000000000 / (if (app_debug) {2} else {1}), 1000000000000 * 10, 0);
+            if (Trie.size(cyclesMonitor) == Trie.size(monitor)){
+                cyclesMonitor := monitor;
+            };
             lastMonitorTime := _now();
         };
-        await* _sendTxs();
-        await* _reconciliation();
+        try{ await* _sendTxs(); }catch(e){};
+        try{ await* _reconciliation(); }catch(e){};
     };
     private var timerId: Nat = 0;
     public shared(msg) func timerStart(_intervalSeconds: Nat): async (){
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);
-        timerId := Timer.recurringTimer(#seconds(_intervalSeconds), timerLoop);
+        timerId := Timer.recurringTimer<system>(#seconds(_intervalSeconds), timerLoop);
     };
     public shared(msg) func timerStop(): async (){
         assert(_onlyOwner(msg.caller));
@@ -2140,7 +2098,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
     /* ===========================
       Upgrade section
     ============================== */
-    private stable var __sagaDataNew: ?SagaTM.Data = null;
+    private stable var __sagaDataNew: ?SagaTM.Data<CustomCallType> = null;
     system func preupgrade() {
         let data = _getSaga().getData();
         __sagaDataNew := ?data;
@@ -2155,7 +2113,189 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs) = this {
             };
             case(_){};
         };
-        timerId := Timer.recurringTimer(#seconds(3600*24), timerLoop);
+        timerId := Timer.recurringTimer<system>(#seconds(3600*24), timerLoop);
+    };
+
+    /* ===========================
+      Backup / Recovery section
+    ============================== */
+    /// ## Backup and Recovery
+    /// The backup and recovery functions are not normally used, but are used when canister cannot be upgraded and needs to be reinstalled:
+    /// - call backup() method to back up the data.
+    /// - reinstall cansiter.
+    /// - call recovery() to restore the data.
+    /// Caution:
+    /// - If the data in this canister has a dependency on canister-id, it must be reinstalled in the same canister and cannot be migrated to a new canister.
+    /// - Normal access needs to be stopped during backup and recovery, otherwise the data may be contaminated.
+    /// - Backup and recovery operations have been categorized by variables, and each operation can only target one category of data, so multiple operations are required to complete the backup and recovery of all data.
+    /// - The backup and recovery operations are not paged for single-variable datasets. If you encounter a failure due to large data size, please try the following:
+    ///     - Calling canister's cleanup function or configuration will delete stale data for some variables.
+    ///     - Backup and recovery of non-essential data can be ignored.
+    ///     - Query the necessary data through other query functions, and then call recovery() to restore the data.
+    ///     - Abandon this solution and seek other data recovery solutions.
+
+    // type Toid = SagaTM.Toid;
+    // type Ttid = SagaTM.Ttid;
+    type Order = SagaTM.Order<CustomCallType>;
+    type Task = SagaTM.Task<CustomCallType>;
+    type SagaData = Backup.SagaData<CustomCallType>;
+    type BackupRequest = Backup.BackupRequest;
+    type BackupResponse = Backup.BackupResponse;
+
+    /// Backs up data of the specified `BackupRequest` classification, and the result is wrapped using the `BackupResponse` type.
+    public shared(msg) func backup(_request: BackupRequest) : async BackupResponse{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData){
+                return #otherData({
+                    minterRemainingBalance = minterRemainingBalance;
+                    totalBtcFee = totalBtcFee;
+                    totalBtcReceiving = totalBtcReceiving;
+                    totalBtcSent = totalBtcSent;
+                    feeBalance = feeBalance;
+                    txInProcess = txInProcess;
+                    txIndex = txIndex;
+                    firstTxIndex = firstTxIndex;
+                    eventBlockIndex = eventBlockIndex;
+                    firstBlockIndex = firstBlockIndex;
+                    ictc_admins = ictc_admins;
+                });
+            };
+            case(#minterUtxos){
+                return #minterUtxos(List.toArray(minterUtxos.0), List.toArray(minterUtxos.1));
+            };
+            case(#accountUtxos){
+                return #accountUtxos(Trie.toArray<Address, (PubKey, DerivationPath, [Utxo]), (Address, (PubKey, DerivationPath, [Utxo]))>(accountUtxos, 
+                    func (k: Address, v: (PubKey, DerivationPath, [Utxo])): (Address, (PubKey, DerivationPath, [Utxo])){
+                        let utxos: [Utxo] = (if (v.2.size() > 0){ [v.2[0]] }else{ [] });
+                        return (k, (v.0, v.1, utxos));
+                    }));
+            };
+            case(#retrieveBTC){
+                return #retrieveBTC(Trie.toArray<EventBlockHeight, Minter.RetrieveStatus, (EventBlockHeight, Minter.RetrieveStatus)>(retrieveBTC, 
+                    func (k: EventBlockHeight, v: Minter.RetrieveStatus): (EventBlockHeight, Minter.RetrieveStatus){
+                        return (k, v);
+                    }));
+            };
+            case(#sendingBTC){
+                return #sendingBTC(Trie.toArray<TxIndex, Minter.SendingBtcStatus, (TxIndex, Minter.SendingBtcStatus)>(sendingBTC, 
+                    func (k: TxIndex, v: Minter.SendingBtcStatus): (TxIndex, Minter.SendingBtcStatus){
+                        return (k, v);
+                    }));
+            };
+            case(#icrc1WasmHistory){
+                let icrc1Wasm: [(wasm: [Nat8], version: Text)] = (if (icrc1WasmHistory.size() > 0){ [icrc1WasmHistory[0]] }else{ [] });
+                return #icrc1WasmHistory(icrc1Wasm);
+            };
+            case(#kyt_accountAddresses){
+                return #kyt_accountAddresses(Trie.toArray<AccountId, [KYT.ChainAccount], (AccountId, [KYT.ChainAccount])>(kyt_accountAddresses, 
+                    func (k: AccountId, v: [KYT.ChainAccount]): (AccountId, [KYT.ChainAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_addressAccounts){
+                return #kyt_addressAccounts(Trie.toArray<Address, [KYT.ICAccount], (Address, [KYT.ICAccount])>(kyt_addressAccounts, 
+                    func (k: Address, v: [KYT.ICAccount]): (Address, [KYT.ICAccount]){
+                        return (k, v);
+                    }));
+            };
+            case(#kyt_txAccounts){
+                return #kyt_txAccounts(Trie.toArray<KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)], (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)])>(kyt_txAccounts, 
+                    func (k: KYT.HashId, v: [(KYT.ChainAccount, KYT.ICAccount)]): (KYT.HashId, [(KYT.ChainAccount, KYT.ICAccount)]){
+                        return (k, v);
+                    }));
+            };
+            case(#icEvents){
+                return #icEvents(Trie.toArray<Minter.BlockHeight, (Minter.Event, Timestamp), (Minter.BlockHeight, (Minter.Event, Timestamp))>(icEvents, 
+                    func (k: Minter.BlockHeight, v: (Minter.Event, Timestamp)): (Minter.BlockHeight, (Minter.Event, Timestamp)){
+                        return (k, v);
+                    }));
+            };
+            case(#icAccountEvents){
+                return #icAccountEvents(Trie.toArray<AccountId, List.List<Minter.BlockHeight>, (AccountId, [Minter.BlockHeight])>(icAccountEvents, 
+                    func (k: AccountId, v: List.List<Minter.BlockHeight>): (AccountId, [Minter.BlockHeight]){
+                        return (k, List.toArray(v));
+                    }));
+            };
+            case(#cyclesMonitor){
+                return #cyclesMonitor(Trie.toArray<Principal, Nat, (Principal, Nat)>(cyclesMonitor, 
+                    func (k: Principal, v: Nat): (Principal, Nat){
+                        return (k, v);
+                    }));
+            };
+        };
+    };
+
+    /// Restore `BackupResponse` data to the canister's global variable.
+    public shared(msg) func recovery(_request: BackupResponse) : async Bool{
+        assert(_onlyOwner(msg.caller));
+        switch(_request){
+            case(#otherData(data)){
+                minterRemainingBalance := data.minterRemainingBalance;
+                totalBtcFee := data.totalBtcFee;
+                totalBtcReceiving := data.totalBtcReceiving;
+                totalBtcSent := data.totalBtcSent;
+                feeBalance := data.feeBalance;
+                txInProcess := data.txInProcess;
+                txIndex := data.txIndex;
+                firstTxIndex := data.firstTxIndex;
+                eventBlockIndex := data.eventBlockIndex;
+                firstBlockIndex := data.firstBlockIndex;
+                ictc_admins := data.ictc_admins;
+            };
+            case(#minterUtxos(data)){
+                minterUtxos := (List.fromArray(data.0), List.fromArray(data.1));
+            };
+            case(#accountUtxos(data)){
+                for ((k, v) in data.vals()){
+                    accountUtxos := Trie.put(accountUtxos, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#retrieveBTC(data)){
+                for ((k, v) in data.vals()){
+                    retrieveBTC := Trie.put(retrieveBTC, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#sendingBTC(data)){
+                for ((k, v) in data.vals()){
+                    sendingBTC := Trie.put(sendingBTC, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#icrc1WasmHistory(data)){
+                icrc1WasmHistory := data;
+            };
+            case(#kyt_accountAddresses(data)){
+                for ((k, v) in data.vals()){
+                    kyt_accountAddresses := Trie.put(kyt_accountAddresses, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#kyt_addressAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_addressAccounts := Trie.put(kyt_addressAccounts, keyt(k), Text.equal, v).0;
+                };
+            };
+            case(#kyt_txAccounts(data)){
+                for ((k, v) in data.vals()){
+                    kyt_txAccounts := Trie.put(kyt_txAccounts, keyb(k), Blob.equal, v).0;
+                };
+            };
+            case(#icEvents(data)){
+                for ((k, v) in data.vals()){
+                    icEvents := Trie.put(icEvents, keyn(k), Nat.equal, v).0;
+                };
+            };
+            case(#icAccountEvents(data)){
+                for ((k, v) in data.vals()){
+                    icAccountEvents := Trie.put(icAccountEvents, keyb(k), Blob.equal, List.fromArray(v)).0;
+                };
+            };
+            case(#cyclesMonitor(data)){
+                for ((k, v) in data.vals()){
+                    cyclesMonitor := Trie.put(cyclesMonitor, keyp(k), Principal.equal, v).0;
+                };
+            };
+        };
+        return true;
     };
 
 };

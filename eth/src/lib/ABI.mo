@@ -7,7 +7,6 @@ import Blob "mo:base/Blob";
 import Text "mo:base/Text";
 import Option "mo:base/Option";
 import List "mo:base/List";
-import Binary "mo:icl/Binary";
 import Hex "mo:icl/Hex";
 
 module {
