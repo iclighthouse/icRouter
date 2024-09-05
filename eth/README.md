@@ -143,18 +143,18 @@ icTokens/setWasm.sh
 
 ### 4. Config
 
-- Synchronise the base information of the blockchain.
+**Synchronise the base information of the blockchain.**
 ```
 dfx canister --network ic call icETHMinter sync '()'
 ```
 
-- Start timer
+**Start timer**
 ```
 dfx canister --network ic call icETHMinter timerStart '(86400)'
 ```
 arg: Nat // Timer interval (seconds).
 
-- Start icETHMinter
+**Start icETHMinter**
 ```
 dfx canister --network ic call icETHMinter setPause '(false)'
 ```
@@ -176,9 +176,9 @@ args:
        - gasLimit: Nat; // The blockchain network's gas limit.
        - ethRatio: Wei/*1 Gwei ETH = ? smallest_unit Token */ // The ratio of token to native token (e.g. ETH) * 1000000000.
 
-### 6. Sets the token's canister-id for trading pair on ICDex.
+### 6. Sets the token's canister-id of trading pair on ICDex.
 
-- Native & Quote token (e.g. icETH & icUSDT)
+**Native & Quote token** (e.g. icETH & icUSDT)
 ```
 dfx canister --network ic call icETHMinter setTokenDexPair '(variant{ETH = record{ quoteToken = "__quote_token_contract_address__"; dexPair = principal "__ canister-id of pair NativeToken/QuoteToken __"}})'
 ```
@@ -186,7 +186,7 @@ args:
 - quoteToken: EthAddress // Quote token contract address.
 - dexPair: Principal // The canister-id of pair NativeToken/QuoteToken.
 
-- Other tokens
+**Other tokens**
 ```
 dfx canister --network ic call icETHMinter setTokenDexPair '(variant{ ERC20 = record{ tokenId = "__token_contract_address__";dexPair=principal "__ canister-id of pair Token/QuoteToken __"}})'
 ```
