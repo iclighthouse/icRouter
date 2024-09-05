@@ -60,13 +60,12 @@ import Backup "lib/BackupTypes";
 
 // InitArgs = {
 //     retrieve_btc_min_amount : Nat64; // 10000
-//     ledger_id : Principal; // 3fwop-7iaaa-aaaak-adzca-cai / 3qr7c-6aaaa-aaaak-adzbq-cai
 //     min_confirmations : ?Nat32;
 //     fixed_fee : Nat; 
 //     dex_pair: ?Principal;
-//     mode: Mode;
 //   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}, true/false
+// icBTC: 3fwop-7iaaa-aaaak-adzca-cai / (Test) 3qr7c-6aaaa-aaaak-adzbq-cai
+// record{retrieve_btc_min_amount=20000; min_confirmations=opt 6; fixed_fee=10; dex_pair=null; true/false
 shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: Bool) = this {
     // assert(initArgs.ecdsa_key_name == "key_1"); 
     // assert(initArgs.btc_network == #Mainnet); 
@@ -110,7 +109,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let KEY_NAME : Text = "key_1"; /*config*/
     let MIN_CONFIRMATIONS : Nat32 = Option.get(initArgs.min_confirmations, 6:Nat32);
     let BTC_MIN_AMOUNT: Nat64 = initArgs.retrieve_btc_min_amount;
-    let GET_BALANCE_COST_CYCLES : Cycles = 100_000_000;
     let GET_UTXOS_COST_CYCLES : Cycles = 10_000_000_000;
     let GET_CURRENT_FEE_PERCENTILES_COST_CYCLES : Cycles = 100_000_000;
     let SEND_TRANSACTION_BASE_COST_CYCLES : Cycles = 5_000_000_000;
@@ -123,21 +121,16 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.0"; /*config*/
+    private let version_: Text = "0.3.1"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
-    private var pause: Bool = initArgs.mode == #ReadOnly;
+    private stable var pause: Bool = false;
     private stable var owner: Principal = installMsg.caller;
     private stable var ic_: Principal = Principal.fromText("aaaaa-aa"); 
-    private stable var icBTC_: Principal = initArgs.ledger_id; 
+    private stable var icBTC_: Principal = Principal.fromText("aaaaa-aa"); // to be configured
     private var ckFixedFee: Nat = initArgs.fixed_fee;
     private var ckDexPair: ?Principal = initArgs.dex_pair;
-    if (app_debug){
-        icBTC_ := Principal.fromText("3qr7c-6aaaa-aaaak-adzbq-cai");
-    };
-    assert(icBTC_ == initArgs.ledger_id);
     private var blackhole_: Text = "7hdtw-jqaaa-aaaak-aaccq-cai";
-    private let sa_zero : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; // Main account
     private let sa_one : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]; // Fees account
     private let ic : ICBTC.Self = actor(Principal.toText(ic_));
     private let icBTC : ICRC1.Self = actor(Principal.toText(icBTC_));
@@ -544,7 +537,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ignore _putEvent(#send({toid = ?toid; to = to; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?toAccountId);
         return toid;
     };
-    private func _mintCkToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
+    private func _mintIcToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
         // mint ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
@@ -1210,12 +1203,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             let fixedFee = Nat64.fromNat(ckFixedFee);
             let value = Nat64.sub(amount, fixedFee);
             let saga = _getSaga();
-            let toid = _mintCkToken(null, account, ownAddress, value, null);
+            let toid = _mintIcToken(null, account, ownAddress, value, null);
             // mint Fee 
             _addFeeBalance(fixedFee);
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
             if (fixedFee > 0){
-                ignore _mintCkToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
+                ignore _mintIcToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
             };
             totalBtcFee += fixedFee;
             totalBtcReceiving += value;
@@ -1325,7 +1318,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                 // mint Fee
                 _addFeeBalance(fee);
                 let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                let toid = _mintCkToken(null, feetoAccount, "", fee, ?"mint_fee");
+                let toid = _mintIcToken(null, feetoAccount, "", fee, ?"mint_fee");
                 // record event
                 let event : Minter.Event = #accepted_retrieve_btc_request({
                     txi = thisTxIndex;
@@ -1567,7 +1560,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply += value;
             ckFeetoBalance += value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintCkToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
+            ignore _mintIcToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
         }else if (ckTotalSupply > nativeBalance){
             var value = Nat.sub(ckTotalSupply, nativeBalance);
             if (value > ckFeetoBalance){ 
@@ -1667,6 +1660,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ckTokenDecimals: Nat8;
     }) : async Principal{
         assert(_onlyOwner(msg.caller));
+        assert(icBTC_ != Principal.fromText("aaaaa-aa"));
         let wasm = _getLatestIcrc1Wasm();
         assert(wasm.0.size() > 0);
         let ic: IC.Self = actor("aaaaa-aa");
@@ -1691,6 +1685,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             mode = #install; // #reinstall; #upgrade; #install
             canister_id = newCanister.canister_id;
         });
+        icBTC_ := newCanister.canister_id;
         //Set FEE_TO & Minter
         let ictokens : ICTokens.Self = actor(Principal.toText(newCanister.canister_id));
         ignore await ictokens.ictokens_config({feeTo = ?Tools.principalToAccountHex(Principal.fromActor(this), ?sa_one)});

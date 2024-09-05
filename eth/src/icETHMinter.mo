@@ -139,7 +139,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.0"; /*config*/
+    private let version_: Text = "0.9.1"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -1271,9 +1271,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let feeTempAccount = {owner = Principal.fromActor(this); subaccount = ?sa_two};
         let icrc1: ICRC1.Self = actor(Principal.toText(_ckToken));
         let pair: ICDex.Self = actor(Principal.toText(_dexPair));
+        let tokenInfo = _getCkTokenInfo(_tokenId);
         let ckTokenFee = await icrc1.icrc1_fee();
         let tradeBlance = await icrc1.icrc1_balance_of({owner = feeTempAccount.owner; subaccount = _toSaBlob(feeTempAccount.subaccount)});
-        if (tradeBlance > ckTokenFee*2){
+        if (tradeBlance > tokenInfo.minAmount + ckTokenFee){
             let tradeAmount = Nat.sub(tradeBlance, ckTokenFee);
             let prepares = await pair.getTxAccount(Tools.principalToAccountHex(feeTempAccount.owner, feeTempAccount.subaccount));
             let tx_icrc1Account = prepares.0;
@@ -1281,10 +1282,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 case(#Ok(blockNum)){
                     switch(await pair.tradeMKT(_ckToken, tradeAmount, null, ?sa_two, ?Text.encodeUtf8("Fee conversion"))){
                         case(#ok(res)){};
-                        case(#err(e)){};
+                        case(#err(e)){
+                            if (app_debug) { throw Error.reject(debug_show(e)) };
+                        };
                     };
                 };
-                case(#Err(e)){};
+                case(#Err(e)){
+                    if (app_debug) { throw Error.reject(debug_show(e)) };
+                };
             };
         };
     };
@@ -1305,7 +1310,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     try{
                         let icrc1: ICRC1.Self = actor(Principal.toText(token.ckLedgerId));
                         let ckTokenFee = await icrc1.icrc1_fee();
-                        if (balance > ckTokenFee*10){
+                        if (balance > ckTokenFee * 2){
                             let amount = Nat.sub(balance, ckTokenFee);
                             switch(await* _sendCkToken2(tokenId, Blob.fromArray(sa_one), {owner = feeTempAccount.owner; subaccount = _toSaBlob(feeTempAccount.subaccount)}, amount)){
                                 case(#Ok(blockNum)){
@@ -1313,7 +1318,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                     ignore _subFeeBalance(tokenId, Nat.min(mainFeeBalance, balance));
                                     ignore _addBalance(mainAccount, tokenId, amount);
                                 };
-                                case(#Err(e)){};
+                                case(#Err(e)){
+                                    if (app_debug) { throw Error.reject(debug_show(e)) };
+                                };
                             };
                         };
                     }catch(e){
@@ -1321,7 +1328,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                     };
                 }else if (tokenId != eth_ and tokenId != quoteToken){
                     let token = _getCkTokenInfo(tokenId);
-                    let minBalance = ethGas.maxFee * token.fee.ethRatio / gwei_ * (if (app_debug) {10} else {100});
+                    let minBalance = ethGas.maxFee * token.fee.ethRatio / gwei_ * (if (app_debug) {10} else {200});
                     if (balance >= minBalance){
                         switch(token.dexPair){
                             case(?(dexPair)){
@@ -1329,7 +1336,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                     let icrc1: ICRC1.Self = actor(Principal.toText(token.ckLedgerId));
                                     // let pair: ICDex.Self = actor(Principal.toText(dexPair));
                                     let ckTokenFee = await icrc1.icrc1_fee();
-                                    if (balance > ckTokenFee*10){
+                                    if (balance > token.minAmount + ckTokenFee * 2){
                                         let amount = Nat.sub(balance, ckTokenFee);
                                         // tranfer fee to feeTempAccount
                                         switch(await* _sendCkToken2(tokenId, Blob.fromArray(sa_one), {owner = feeTempAccount.owner; subaccount = _toSaBlob(feeTempAccount.subaccount)}, amount)){
@@ -1338,7 +1345,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                                 ignore _subFeeBalance(tokenId, Nat.min(mainFeeBalance, balance));
                                                     ignore _addBalance(mainAccount, tokenId, amount);
                                             };
-                                            case(#Err(e)){};
+                                            case(#Err(e)){
+                                                if (app_debug) { throw Error.reject(debug_show(e)) };
+                                            };
                                         };
                                         // icERC20 -> icUSDT
                                         await* _feeSwap(tokenId, token.ckLedgerId, dexPair);
@@ -1375,7 +1384,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         ignore _subBalance(mainAccount, eth_, Nat.min(mainBalance, feeBalance));
                         ignore _addFeeBalance(eth_, feeAmount);
                     };
-                    case(#Err(e)){};
+                    case(#Err(e)){
+                        if (app_debug) { throw Error.reject(debug_show(e)) };
+                    };
                 };
             };
         }
@@ -1585,7 +1596,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         if (tx.txType == #Withdraw and isERC20){
                             let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
                             ignore _addFeeBalance(tx.tokenId, feeDiff);
-                            ignore _mintCkToken(tx.tokenId, feeAccount, feeDiff, ?_txi, ?"mint_ck_token(fee)");
+                            ignore _mintIcToken(tx.tokenId, feeAccount, feeDiff, ?_txi, ?"mint_ck_token(fee)");
                             let mainFeeBalance = _getFeeBalance(eth_);
                             ignore _subFeeBalance(eth_, Nat.min(mainFeeBalance, feeDiffEth));
                             ignore _burnCkToken(eth_, Blob.fromArray(sa_one), feeDiffEth, feeAccount, ?"burn_ck_token(fee)");
@@ -2136,7 +2147,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return await icrc1.icrc1_transfer(args);
     };
-    private func _mintCkToken(tokenId: EthAddress, account: Account, amount: Wei, txi: ?TxIndex, ictcName: ?Text) : SagaTM.Toid{
+    private func _mintIcToken(tokenId: EthAddress, account: Account, amount: Wei, txi: ?TxIndex, ictcName: ?Text) : SagaTM.Toid{
         // mint ckToken
         let ckTokenCanisterId = _getCkTokenInfo(tokenId).ckLedgerId;
         let txiBlob = Blob.fromArray(Binary.BigEndian.fromNat64(Nat64.fromNat(Option.get(txi, 0)))); 
@@ -2238,14 +2249,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             amount -= Nat.min(amount, fee);
                             ignore _addFeeBalance(tx.tokenId, fee);
                             let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                            let toid = _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex, ?"mint_ck_token(fee)");
+                            let toid = _mintIcToken(tx.tokenId, feeAccount, fee, ?_txIndex, ?"mint_ck_token(fee)");
                             toids := Tools.arrayAppend(toids, [toid]);
                         }else{
                             fee := Nat.sub(ckFee.eth, gasFee.maxFee);
                             amount -= Nat.min(amount, fee);
                             ignore _addFeeBalance(tx.tokenId, fee);
                             let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-                            let toid = _mintCkToken(tx.tokenId, feeAccount, fee, ?_txIndex, ?"mint_ck_token(fee)");
+                            let toid = _mintIcToken(tx.tokenId, feeAccount, fee, ?_txIndex, ?"mint_ck_token(fee)");
                             toids := Tools.arrayAppend(toids, [toid]);
                         };
                         ignore _addBalance(tx.account, tx.tokenId, amount);
@@ -2258,7 +2269,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             ignore _subBalance(tx.account, tx.tokenId, depositingBalance);
                             ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tx.tokenId, depositingBalance);
                             // mint ckToken
-                            let toid = _mintCkToken(tx.tokenId, tx.account, depositingBalance, ?_txIndex, null);
+                            let toid = _mintIcToken(tx.tokenId, tx.account, depositingBalance, ?_txIndex, null);
                             toids := Tools.arrayAppend(toids, [toid]);
                         };
                     }else if(tx.txType == #DepositGas){ // _isPending()
@@ -2522,7 +2533,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 ignore _subBalance(account, tokenId, depositingBalance);
                                 ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
                                 // mint ckToken
-                                let toid = _mintCkToken(tokenId, account, depositingBalance, null, ?"mint_ck_token(update)");
+                                let toid = _mintIcToken(tokenId, account, depositingBalance, null, ?"mint_ck_token(update)");
                                 await* _ictcSagaRun(toid, false);
                             };
                         };
@@ -2540,7 +2551,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 ignore _subBalance(account, tokenId, depositingBalance);
                                 ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenId, depositingBalance);
                                 // mint ckToken
-                                let toid = _mintCkToken(tokenId, account, depositingBalance, null, ?"mint_ck_token(update)");
+                                let toid = _mintIcToken(tokenId, account, depositingBalance, null, ?"mint_ck_token(update)");
                                 await* _ictcSagaRun(toid, false);
                             };
                         };
@@ -2577,7 +2588,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             amount -= fee;
             ignore _addFeeBalance(tokenTxn.token, fee);
             let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-            let toid = _mintCkToken(tokenTxn.token, feeAccount, fee, null, ?"mint_ck_token(fee)");
+            let toid = _mintIcToken(tokenTxn.token, feeAccount, fee, null, ?"mint_ck_token(fee)");
             toids := Tools.arrayAppend(toids, [toid]);
             ignore _addBalance(_account, tokenTxn.token, amount);
             _confirmDepositTxn(_txHash, #Confirmed, ?(tokenTxn), ?_now(), null);
@@ -2591,7 +2602,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 ignore _subBalance(_account, tokenTxn.token, depositingBalance);
                 ignore _addBalance({owner = Principal.fromActor(this); subaccount = null}, tokenTxn.token, depositingBalance);
                 // mint ckToken
-                let toid = _mintCkToken(tokenTxn.token, _account, depositingBalance, null, null);
+                let toid = _mintIcToken(tokenTxn.token, _account, depositingBalance, null, null);
                 toids := Tools.arrayAppend(toids, [toid]);
             };
         };
@@ -2769,7 +2780,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ignore _subBalance(mainAccount, tokenId, Nat.min(_getBalance(mainAccount, tokenId), _amount)); 
         ignore _addFeeBalance(tokenId, ckFee.token);
         let feeAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one};
-        ignore _mintCkToken(tokenId, feeAccount, ckFee.token, null, ?"mint_ck_token(fee)");
+        ignore _mintIcToken(tokenId, feeAccount, ckFee.token, null, ?"mint_ck_token(fee)");
         ignore _subFeeBalance(eth_, Nat.min(_getFeeBalance(eth_), gasFee.maxFee));
         ignore _burnCkToken(eth_, Blob.fromArray(sa_one), gasFee.maxFee, feeAccount, ?"burn_ck_token(fee)");
         let txi = _newTx(#Withdraw, account, tokenId, mainAddress, toAddress, sendingAmount, gasFee);
@@ -3785,7 +3796,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 let value = Nat.sub(nativeBalance, ckTotalSupply);
                 ckTotalSupply += value;
                 ckFeetoBalance += value;
-                ignore _mintCkToken(tokenId, {owner = Principal.fromActor(this); subaccount = ?sa_one }, value, null, ?"mint_ck_token(update)");
+                ignore _mintIcToken(tokenId, {owner = Principal.fromActor(this); subaccount = ?sa_one }, value, null, ?"mint_ck_token(update)");
             };
             _setFeeBalance(tokenId, ckFeetoBalance);
             _setBalance(mainAccount, tokenId, Nat.sub(ckTotalSupply, ckFeetoBalance));

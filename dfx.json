@@ -2,11 +2,13 @@
     "canisters": {
       "icBTCMinterTest": {
         "main": "./btc/src/icBTCMinter.mo",
-        "type": "motoko"
+        "type": "motoko",
+        "gzip" : true
       },
       "icBTCMinter": {
         "main": "./btc/src/icBTCMinter.mo",
-        "type": "motoko"
+        "type": "motoko",
+        "gzip" : true
       },
       "icToken": {
         "main": "./icTokens/DRC20.mo",
@@ -14,7 +16,8 @@
       },
       "icETHMinter": {
         "main": "./eth/src/icETHMinter.mo",
-        "type": "motoko"
+        "type": "motoko",
+        "gzip" : true
       },
       "icETHMinterTest": {
         "main": "./eth/src/icETHMinter.mo",
