@@ -1,11 +1,63 @@
 /**
  * Module     : icBTC Minter
  * Author     : ICLighthouse Team
- *              the basic_bitcoin library modified according to https://github.com/dfinity/examples/tree/master/motoko/basic_bitcoin
- * License    : Apache License 2.0
  * Stability  : Experimental
  * Github     : https://github.com/iclighthouse/
  */
+///
+/// ## Overview
+///
+/// icRouter enables the integration of Bitcoin and IC network through the Threshold Signature Scheme (TSS, also known as chain-key 
+/// technology). icBTCs are 1:1 ICRC1 tokens minted cross-chain from Bitcoin to the IC network, and you can retrieve the original BTCs 
+/// at any time. this is all done in a bridgeless manner, and its security depends on the security of the IC network.
+///
+/// ## Concepts
+/// 
+/// ### TSS and chain-key
+///
+/// Threshold Signature Scheme (TSS) is a multi-signature scheme that does not require the exposure of private keys and is well 
+/// suited for 100% chain implementation of cross-chain transactions, which is also referred to as chain-key technology on IC.
+///
+/// ### External Chain and Coordinating chain
+/// 
+/// External Chain is a blockchain that integrates with IC network, such as bitcoin network.  
+/// Coordinating chain is the blockchain where decentralised cross-chain smart contracts are located, in this case IC.
+///
+/// ### Original token and Wrapped token
+/// 
+/// Original tokens are tokens issued on external chain, such as BTC.  
+/// Wrapped tokens are tokens that have been wrapped by a smart contract with a 1:1 correspondence and issued on IC, such as icBTC.
+///
+/// ### Minting and Retrieval
+///
+/// Minting is the process of locking the original tokens of an external chain into the Minter contract of the coordinating chain 
+/// and issuing the corresponding wrapped tokens. Retrieval is burning the wrapped tokens and sending the corresponding original 
+/// tokens in the Minter contract to the holder.
+/// 
+/// ## How it works
+/// 
+/// icRouter's btcMinter Canister enables communication with the Bitcoin network by calling the chain-key interface of the IC network, 
+/// which has a dedicated subnet to provide block data and threshold ECDSA signatures, and to provide consensus.
+/// 
+/// ### Minting: BTC -> icBTC
+/// 
+/// Cross-chaining native BTC to the IC network requires three steps:
+/// - (1) The user calls get_btc_address() method of btcMinter to get the deposit address of external chain, which is different for 
+/// each user. It has no plaintext private key and is decentrally controlled by a dedicated subnet of the IC using TSS technology.
+/// - (2) The user sends BTC in his/her BTC wallet to the above deposit address.
+/// - (3) After waiting for transaction confirmation, the user calls update_balance() method of btcMinter to mint the corresponding 
+/// icBTC in IC network. Native BTC UTXOs are controlled by the btcMinter canister, and the 1:1 corresponding icBTC are ICRC1 tokens 
+/// on the IC network.
+/// 
+/// ### Retrieval: icBTC -> BTC
+///
+/// Retrieving native BTC from the IC network requires three steps.
+/// - (1) The user gets the withdrawal address of IC (owner is btcMinter canister-id, subaccount is user account-id), or he can 
+/// call btcMinter's get_withdrawal_account() method to get it (this is a query method, so needs to pay attention to its security).
+/// - (2) The user sends icBTC to the above withdrawal address and burns them.
+/// - (3) The user calls btcMinter's retrieve_btc() method to provide his/her BTC address of external chain and retrieve the native BTC. 
+/// In this process, the BTCs that were originally stored in the btcMinter canister are sent to the destination address using the 
+/// TSS technique.
 
 import Trie "mo:base/Trie"; // "./lib/Elastic-Trie";
 import Principal "mo:base/Principal";
@@ -58,18 +110,25 @@ import DRC20 "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
 import Backup "lib/BackupTypes";
 
-// InitArgs = {
-//     retrieve_btc_min_amount : Nat64; // 10000
-//     ledger_id : Principal; // 3fwop-7iaaa-aaaak-adzca-cai / 3qr7c-6aaaa-aaaak-adzbq-cai
-//     min_confirmations : ?Nat32;
-//     fixed_fee : Nat; 
-//     dex_pair: ?Principal;
-//     mode: Mode;
-//   };
-// record{retrieve_btc_min_amount=20000;ledger_id=principal "3qr7c-6aaaa-aaaak-adzbq-cai"; min_confirmations=opt 6; fixed_fee=0; dex_pair=null; mode=variant{GeneralAvailability}}, true/false
+/// 
+/// ## Deployment
+/// 
+/// args:
+/// - initArgs:
+///     - retrieve_btc_min_amount : Nat64; // Minimum number of BTC that can be retrieved (satoshi).
+///     - min_confirmations : ?Nat32; // The minimum confirmation blocks for a transaction on bitcoin network.
+///     - fixed_fee : Nat; // Fixed fee (satoshi) that will be charged for each operation (mint/retrieve).
+///     - dex_pair: ?Principal; // icBTC trading pair on ICDex (optional).
+/// - enDebug: Bool; // Whether to start debugging.
+/// Note: 
+/// - These parameters filled in will take effect each time you upgrade.
+/// - btcMinter calls bitcoin mainnet data (ecdsa_key_name == "key_1").
+///
+/// ## API
+///
+
+// e.g. record{retrieve_btc_min_amount=20000; min_confirmations=opt 6; fixed_fee=10; dex_pair=null}, true/false
 shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: Bool) = this {
-    // assert(initArgs.ecdsa_key_name == "key_1"); 
-    // assert(initArgs.btc_network == #Mainnet); 
     assert(Option.get(initArgs.min_confirmations, 0:Nat32) > 3); /*config*/
     type Network = Minter.BtcNetwork;
     type Account = Minter.Account;
@@ -110,7 +169,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let KEY_NAME : Text = "key_1"; /*config*/
     let MIN_CONFIRMATIONS : Nat32 = Option.get(initArgs.min_confirmations, 6:Nat32);
     let BTC_MIN_AMOUNT: Nat64 = initArgs.retrieve_btc_min_amount;
-    let GET_BALANCE_COST_CYCLES : Cycles = 100_000_000;
     let GET_UTXOS_COST_CYCLES : Cycles = 10_000_000_000;
     let GET_CURRENT_FEE_PERCENTILES_COST_CYCLES : Cycles = 100_000_000;
     let SEND_TRANSACTION_BASE_COST_CYCLES : Cycles = 5_000_000_000;
@@ -123,24 +181,19 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.0"; /*config*/
+    private let version_: Text = "0.3.2"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
-    private var pause: Bool = initArgs.mode == #ReadOnly;
+    private stable var pause: Bool = false;
     private stable var owner: Principal = installMsg.caller;
-    private stable var ic_: Principal = Principal.fromText("aaaaa-aa"); 
-    private stable var icBTC_: Principal = initArgs.ledger_id; 
+    private stable let ic_: Principal = Principal.fromText("aaaaa-aa"); 
+    private stable var icBTC_: Principal = Principal.fromText("aaaaa-aa"); // to be configured
     private var ckFixedFee: Nat = initArgs.fixed_fee;
     private var ckDexPair: ?Principal = initArgs.dex_pair;
-    if (app_debug){
-        icBTC_ := Principal.fromText("3qr7c-6aaaa-aaaak-adzbq-cai");
-    };
-    assert(icBTC_ == initArgs.ledger_id);
     private var blackhole_: Text = "7hdtw-jqaaa-aaaak-aaccq-cai";
-    private let sa_zero : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]; // Main account
     private let sa_one : [Nat8] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]; // Fees account
     private let ic : ICBTC.Self = actor(Principal.toText(ic_));
-    private let icBTC : ICRC1.Self = actor(Principal.toText(icBTC_));
+    private var icBTC : ICRC1.Self = actor(Principal.toText(icBTC_));
     private stable var icBTCFee: Nat = 20;
     private stable var btcFee: Nat64 = 3000;  // MillisatoshiPerByte
     private stable var lastUpdateFeeTime : Time.Time = 0;
@@ -326,7 +379,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return not(pause);
     };
 
-    /// SagaTM
+    // SagaTM
     // Local tasks
     private func _local_buildTx(_txi: Nat) : async* {txi: Nat; signedTx: [Nat8]}{ 
         switch(Trie.get(sendingBTC, keyn(_txi), Nat.equal)){
@@ -544,7 +597,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ignore _putEvent(#send({toid = ?toid; to = to; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?toAccountId);
         return toid;
     };
-    private func _mintCkToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
+    private func _mintIcToken(optToid: ?Nat, account: Account, userAddress: Text, amount: Nat64, ictcName: ?Text) : SagaTM.Toid{
         // mint ckToken
         let ckTokenCanisterId = icBTC_;
         let accountId = _accountId(account.owner, account.subaccount);
@@ -654,7 +707,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
     };
 
-    /// update btc balances
     private func _fetchAccountAddress(_a: AccountId) : async* (pubKey: [Nat8], address: Text){
         var ownPublicKey : [Nat8] = [];
         var ownAddress = "";
@@ -967,7 +1019,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             }
         };
     };
-    /// build tx
+    // build signed transaction
     private func _buildSignedTx(
         txi: Nat, 
         ownUtxos: [VaultUtxo], // -> Deque.Deque<VaultUtxo>
@@ -991,7 +1043,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         let signedTxnBytes = await* _signTx(txi, transaction, spendUtxos);
         return {tx = signedTxnBytes; txid = transaction.id() };
     };
-    /// sign transaction
+    // sign transaction
     private func _signTx(txi: Nat, transaction: Transaction, vUtxos: [VaultUtxo]) : async* [Nat8] { // key_name
         assert(transaction.txInputs.size() == vUtxos.size());
         let scriptSigs = Array.init<Script>(transaction.txInputs.size(), []);
@@ -1043,7 +1095,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         return transaction.toBytes();
     };
-    /// build transaction
+    // build transaction
     private func _buildTransaction( version : Nat32, 
         own_utxos: Deque.Deque<VaultUtxo>,
         destinations : [(TypeAddress, Satoshi)], 
@@ -1136,6 +1188,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
     };
 
+    // Check the balances of icBTCMinter and deal with exceptions.
     private func _reconciliation() : async* (){
         // nativeBalance >= minterBalance
         // nativeBalance >= ckTotalSupply
@@ -1155,6 +1208,9 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     };
 
     // Public methds
+
+    /// Returns the deposit address, which is different for each user. It has no plaintext private key and is decentrally 
+    /// controlled by a dedicated subnet of the IC using TSS technology.
     public shared(msg) func get_btc_address(_account : Account): async Text{
         assert(_notPaused() or _onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -1162,6 +1218,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return address;
     };
     
+    /// Mint the corresponding icBTC on IC after transferring BTC to the deposit address.
     public shared(msg) func update_balance(_account : Account): async {
         #Ok : Minter.UpdateBalanceResult; // { block_index : Nat64; amount : Nat64 }
         #Err : Minter.UpdateBalanceError;
@@ -1210,12 +1267,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             let fixedFee = Nat64.fromNat(ckFixedFee);
             let value = Nat64.sub(amount, fixedFee);
             let saga = _getSaga();
-            let toid = _mintCkToken(null, account, ownAddress, value, null);
+            let toid = _mintIcToken(null, account, ownAddress, value, null);
             // mint Fee 
             _addFeeBalance(fixedFee);
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
             if (fixedFee > 0){
-                ignore _mintCkToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
+                ignore _mintIcToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
             };
             totalBtcFee += fixedFee;
             totalBtcReceiving += value;
@@ -1237,11 +1294,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
     };
     
+    /// Gets the withdrawal address of icBTC. 
+    /// Note: It is a query method, so you need to pay attention to its security.
     public query func get_withdrawal_account(_account : Account) : async Minter.Account{
         let accountId = _accountId(_account.owner, _account.subaccount);
         return {owner=Principal.fromActor(this); subaccount=?Blob.toArray(accountId)};
     };
-    public shared(msg) func retrieve_btc(args: Minter.RetrieveBtcArgs, _sa: ?Sa) : async { //{ address : Text; amount : Nat64 }
+
+    /// Provide BTC address and retrieve the native BTC.
+    public shared(msg) func retrieve_btc(args: Minter.RetrieveBtcArgs, _sa: ?Sa) : async {
         #Ok : Minter.RetrieveBtcOk; //{ block_index : Nat64 };
         #Err : Minter.RetrieveBtcError;
       }{
@@ -1325,7 +1386,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                 // mint Fee
                 _addFeeBalance(fee);
                 let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-                let toid = _mintCkToken(null, feetoAccount, "", fee, ?"mint_fee");
+                let toid = _mintIcToken(null, feetoAccount, "", fee, ?"mint_fee");
                 // record event
                 let event : Minter.Event = #accepted_retrieve_btc_request({
                     txi = thisTxIndex;
@@ -1354,6 +1415,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
       };
     
+    /// Batch submit txns for sending BTC by coordinating chain smart contract. Note: this does not have to be called, normally the timer performs these tasks 
+    /// and only needs to be called for testing or when urgently needed.
     public shared(msg) func batch_send(_txIndex: ?Nat) : async Bool{
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
@@ -1387,6 +1450,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return false;
     };
 
+    /// Returns the status of the retrieval operation.
     public query func retrieve_btc_status(args: { block_index : Nat64; }) : async Minter.RetrieveBtcStatus{
         switch(Trie.get(retrieveBTC, keyn(Nat64.toNat(args.block_index)), Nat.equal)){
             case(?(item)){
@@ -1402,6 +1466,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             case(_){ return #Unknown; };
         };
     };
+
+    /// Returns retrieval log.
     public query func retrieval_log(_blockIndex : ?Nat64) : async ?Minter.RetrieveStatus{
         let blockIndex_ = Option.get(_blockIndex, Nat64.fromNat(eventBlockIndex));
         switch(Trie.get(retrieveBTC, keyn(Nat64.toNat(blockIndex_)), Nat.equal)){
@@ -1411,11 +1477,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             case(_){ return null; };
         };
     };
+
+    /// Returns retrieval log list.
     public query func retrieval_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<EventBlockHeight, Minter.RetrieveStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
         return ICEvents.trieItems2<Minter.RetrieveStatus>(retrieveBTC, firstBlockIndex, eventBlockIndex, page, size);
     };
+
+    /// Returns sending btc log.
     public query func sending_log(_txIndex : ?Nat) : async ?Minter.SendingBtcStatus{
         let txIndex_ = Option.get(_txIndex, txIndex);
         switch(Trie.get(sendingBTC, keyn(txIndex_), Nat.equal)){
@@ -1425,19 +1495,25 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             case(_){ return null; };
         };
     };
+
+    /// Returns sending btc log list.
     public query func sending_log_list(_page: ?ListPage, _size: ?ListSize) : async TrieList<TxIndex, Minter.SendingBtcStatus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
         return ICEvents.trieItems2<Minter.SendingBtcStatus>(sendingBTC, firstTxIndex, txIndex, page, size);
     };
 
+    /// Returns utxos at the specified address.
     public query func utxos(_address: Address) : async ?(PubKey, DerivationPath, [Utxo]){
         return _getAccountUtxos(_address);
     };
+
+    /// Returns utxos of icBTCMinter pool (vault).
     public query func vaultUtxos() : async (Nat64, [(Address, PubKey, DerivationPath, Utxo)]){
         return (minterRemainingBalance, List.toArray(List.append(minterUtxos.0, List.reverse(minterUtxos.1))));
     };
 
+    /// Returns the current status data of icBTCMinter.
     public query func stats() : async {
         blockIndex: Nat64;
         txIndex: Nat;
@@ -1462,6 +1538,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
     };
 
+    /// Return information about icBTCMinter.
     public query func get_minter_info() : async {
         enDebug: Bool; // app_debug 
         btcNetwork: Network; //NETWORK
@@ -1493,6 +1570,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             minter_address = minter_address;
         };
     };
+
+    /// Returns icBTC token information
     public query func get_ck_tokens() : async [Minter.TokenInfo]{
         return [{
             symbol = "BTC";
@@ -1510,15 +1589,21 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     /* ===========================
       Management section
     ============================== */
+
+    /// Returns owner of the canister.
     public query func getOwner() : async Principal{  
         return owner;
     };
+
+    /// Change owner.
     public shared(msg) func changeOwner(_newOwner: Principal) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         owner := _newOwner;
         ignore _putEvent(#changeOwner({newOwner = _newOwner}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Pause (true) or start (false) the canister.
     public shared(msg) func setPause(_pause: Bool) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         pause := _pause;
@@ -1529,6 +1614,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         return true;
     }; 
+
+    /// Clears the event logs based on index height.
     public shared(msg) func clearEvents(_clearFrom: EventBlockHeight, _clearTo: EventBlockHeight): async (){
         assert(_onlyOwner(msg.caller));
         assert(_clearTo >= _clearFrom);
@@ -1540,6 +1627,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         firstBlockIndex := _clearTo + 1;
     };
+
+    /// Clears the transaction status record for sending BTC.
     public shared(msg) func clearSendingTxs(_clearFrom: TxIndex, _clearTo: TxIndex): async (){
         assert(_onlyOwner(msg.caller));
         assert(_clearTo >= _clearFrom);
@@ -1549,8 +1638,12 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         firstTxIndex := _clearTo + 1;
     };
+
+    /// Rebalance icBTCMinter.
+    ///
+    /// Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of 
+    /// block confirmations before calling this function after suspending the contract operation.
     public shared(msg) func updateMinterBalance(_surplusToFee: Bool) : async {pre: Minter.BalanceStats; post: Minter.BalanceStats; shortfall: Nat}{
-        // Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of block confirmations before calling this function after suspending the contract operation.
         assert(_onlyOwner(msg.caller));
         assert(_ictcAllDone());
         await* _initMinterAddress();
@@ -1567,7 +1660,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply += value;
             ckFeetoBalance += value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintCkToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
+            ignore _mintIcToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
         }else if (ckTotalSupply > nativeBalance){
             var value = Nat.sub(ckTotalSupply, nativeBalance);
             if (value > ckFeetoBalance){ 
@@ -1584,6 +1677,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         let _f = _getSaga().run(0);
         return {pre = preBalance; post = postBalance; shortfall = shortfall};
     };
+
+    /// Allocate rewards from the FEE balance.
     public shared(msg) func allocateRewards(_account: Account, _value: Nat, _sendAllBalance: Bool) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         let value = _value; 
@@ -1591,6 +1686,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return true;
     };
 
+    /// For debugging.
     public shared(msg) func debug_get_utxos(_address: Address) : async ICBTC.GetUtxosResponse{
         assert(_onlyOwner(msg.caller));
         Cycles.add<system>(GET_UTXOS_COST_CYCLES);
@@ -1600,6 +1696,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             filter = ?#MinConfirmations(MIN_CONFIRMATIONS); 
         });
     };
+
+    /// For debugging.
     public query func debug_sendingBTC(_txIndex : ?Nat) : async ?Text{
         let txIndex_ = Option.get(_txIndex, txIndex);
         switch(Trie.get(sendingBTC, keyn(txIndex_), Nat.equal)){
@@ -1611,21 +1709,21 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             case(_){ return null; };
         };
     };
+
+    /// For debugging.
     public shared(msg) func debug_charge_address(): async Text{
         assert(_onlyOwner(msg.caller));
         let res = await* _fetchAccountAddress(Blob.fromArray([]));
         return res.1;
     };
-    // public shared(msg) func debug_send(dst: Text, amount: Nat64) : async Text{
-    //     assert(_onlyOwner(msg.caller));
-    //     let accountId = Blob.toArray(_accountId(msg.caller, null));
-    //     let txid = await Wallet.send(NETWORK, [accountId], KEY_NAME, dst, amount);
-    //     return Utils.bytesToText(txid);
-    // };
+    
+    /// For debugging.
     public shared(msg) func debug_reSendBTC(_txIndex: Nat, _fee: Nat) : async (){
         assert(_onlyOwner(msg.caller));
         await* _reSendBtc(_txIndex, _fee);
     };
+
+    /// For debugging.
     public shared(msg) func debug_reconciliation(): async (){
         assert(_onlyOwner(msg.caller));
         await* _reconciliation();
@@ -1641,6 +1739,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             return icrc1WasmHistory[0];
         };
     };
+
+    /// Sets token wasm.
     public shared(msg) func setCkTokenWasm(_wasm: Blob, _version: Text) : async (){
         assert(_onlyOwner(msg.caller));
         assert(Option.isNull(Array.find(icrc1WasmHistory, func (t: ([Nat8], Text)): Bool{ _version == t.1 })));
@@ -1650,15 +1750,27 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         ignore _putEvent(#config({setting = #setTokenWasm({version=_version; size=_wasm.size()})}), ?_accountId(owner, null));
     };
+
+    /// Gets version of token wasm.
     public query func getCkTokenWasmVersion() : async (Text, Nat){ 
         let wasm = _getLatestIcrc1Wasm();
         return (wasm.1, wasm.0.size());
     };
+
+    /// Gets version history of token wasm.
     public query func getCkTokenWasmHistory(): async [(Text, Nat)]{
         return Array.map<([Nat8], Text), (Text, Nat)>(icrc1WasmHistory, func (t: ([Nat8], Text)): (Text, Nat){
             return (t.1, t.0.size());
         });
     };
+
+    /// Creates wrapped token (icBTC).  
+    /// args:
+    /// - totalSupply: ?Nat; // Maximum supply of icBTC (satoshi) - Optional.
+    /// - ckTokenFee: Nat; // The transaction fee (satoshi) for icBTC .
+    /// - ckTokenName: Text; // Token name, e.g. "BTC on IC".
+    /// - ckTokenSymbol: Text; // Token symbol, e.g. "icBTC".
+    /// - ckTokenDecimals: Nat8; // Token decimals, e.g. "8".
     public shared(msg) func launchToken(_args: {
         totalSupply: ?Nat/*smallest_unit Token*/; 
         ckTokenFee: Nat/*smallest_unit Token*/; 
@@ -1667,6 +1779,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         ckTokenDecimals: Nat8;
     }) : async Principal{
         assert(_onlyOwner(msg.caller));
+        assert(icBTC_ == Principal.fromText("aaaaa-aa")); // uninitialised state
         let wasm = _getLatestIcrc1Wasm();
         assert(wasm.0.size() > 0);
         let ic: IC.Self = actor("aaaaa-aa");
@@ -1691,6 +1804,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             mode = #install; // #reinstall; #upgrade; #install
             canister_id = newCanister.canister_id;
         });
+        icBTC_ := newCanister.canister_id;
+        icBTC := actor(Principal.toText(icBTC_));
         //Set FEE_TO & Minter
         let ictokens : ICTokens.Self = actor(Principal.toText(newCanister.canister_id));
         ignore await ictokens.ictokens_config({feeTo = ?Tools.principalToAccountHex(Principal.fromActor(this), ?sa_one)});
@@ -1698,6 +1813,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, newCanister.canister_id);
         return newCanister.canister_id;
     };
+
+    /// Sets logo of icBTC token.
     public shared(msg) func setTokenLogo(_canisterId: Principal, _logo: Text): async Bool{
         assert(_onlyOwner(msg.caller));
         let token = actor(Principal.toText(_canisterId)) : actor{ 
@@ -1709,6 +1826,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         metadata := Tools.arrayAppend(metadata, [{ content = _logo; name = "logo" }]);
         return await token.ictokens_setMetadata(metadata);
     };
+
+    /// Upgrades icBTC token.
     public shared(msg) func upgradeToken(_canisterId: Principal, _version: Text): async (version: Text){
         assert(_onlyOwner(msg.caller));
         var wasm : [Nat8] = [];
@@ -1765,26 +1884,38 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return Nat.sub(eventBlockIndex, 1);
     };
     ignore _putEvent(#initOrUpgrade({initArgs = initArgs}), ?_accountId(owner, null));
+
+    /// Returns an event log.
     public query func get_event(_blockIndex: EventBlockHeight) : async ?(Event, Timestamp){
         return ICEvents.getEvent(icEvents, _blockIndex);
     };
+
+    /// Returns the first index of events that exists in the canister.
     public query func get_event_first_index() : async EventBlockHeight{
         return firstBlockIndex;
     };
+
+    /// Returns event log list.
     public query func get_events(_page: ?ListPage, _size: ?ListSize) : async TrieList<EventBlockHeight, (Event, Timestamp)>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
         return ICEvents.trieItems2<(Event, Timestamp)>(icEvents, firstBlockIndex, eventBlockIndex, page, size);
     };
+
+    /// Returns event logs for the specified account.
     public query func get_account_events(_accountId: AccountId) : async [(Event, Timestamp)]{ //latest 1000 records
         return ICEvents.getAccountEvents<Event>(icEvents, icAccountEvents, _accountId);
     };
+
+    /// Returns the number of specified account's events.
     public query func get_event_count() : async Nat{
         return eventBlockIndex;
     };
 
     /* ===========================
       KYT section
+      Instead of using blacklists, whitelists, and auditing mechanisms, a method of providing on-chain data transparency 
+      was used to deal with money laundering.
     ============================== */
     private let chainName = "Bitcoin";
     private func _putAddressAccount(_address: KYT.Address, _account: KYT.Account) : (){
@@ -1813,25 +1944,38 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         return KYT.getTxAccount(kyt_txAccounts, _txHash);
     };
 
+    /// Query the address of the relevant bitcoin chain by the IC's account-id.
     public query func get_cached_address(_accountId : KYT.AccountId) : async ?[KYT.ChainAccount]{
         return _getAccountAddress(_accountId);
     };
+
+    /// Query the IC's account-id by the address of the bitcoin chain.
     public query func get_cached_account(_address : KYT.Address) : async ?[KYT.ICAccount]{
         return _getAddressAccount(_address);
     };
+
+    /// Query the IC's account-id by the txid of the bitcoin chain.
     public query func get_cached_tx_account(_txHash: KYT.TxHash) : async ?[(KYT.ChainAccount, KYT.ICAccount)]{
         return _getTxAccount(_txHash);
     };
 
-    // Cycles monitor
+    /* ===========================
+     Cycles monitor
+    ============================== */
+
+    /// Put a canister-id into the monitor.
     public shared(msg) func monitor_put(_canisterId: Principal): async (){
         assert(_onlyOwner(msg.caller));
         cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, _canisterId);
     };
+
+    /// Remove a canister-id from the monitor.
     public shared(msg) func monitor_remove(_canisterId: Principal): async (){
         assert(_onlyOwner(msg.caller));
         cyclesMonitor := CyclesMonitor.remove(cyclesMonitor, _canisterId);
     };
+
+    /// Returns all canister-ids in the monitor.
     public query func monitor_canisters(): async [(Principal, Nat)]{
         return Iter.toArray(Trie.iter(cyclesMonitor));
     };
@@ -1842,63 +1986,80 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     * (Optional) Implement the following interface, which allows you to browse transaction records and execute compensation transactions through a UI interface.
     * https://cmqwp-uiaaa-aaaaj-aihzq-cai.raw.ic0.app/
     */
-    // ICTC: management functions
+    // TO = Transaction Order, which contain one or more TTs.
+    // TT = Transaction Task.
     private stable var ictc_admins: [Principal] = [];
     private func _onlyIctcAdmin(_caller: Principal) : Bool { 
         return Option.isSome(Array.find(ictc_admins, func (t: Principal): Bool{ t == _caller }));
     }; 
     private func _onlyBlocking(_toid: Nat) : Bool{
-        /// Saga
+        // Saga
         switch(_getSaga().status(_toid)){
             case(?(status)){ return status == #Blocking };
             case(_){ return false; };
         };
-        /// 2PC
-        // switch(_getTPC().status(_toid)){
-        //     case(?(status)){ return status == #Blocking };
-        //     case(_){ return false; };
-        // };
     };
+
+    /// Returns to ICTC administrators
     public query func ictc_getAdmins() : async [Principal]{
         return ictc_admins;
     };
+
+    /// Add an ICTC administrator.
     public shared(msg) func ictc_addAdmin(_admin: Principal) : async (){
         assert(_onlyOwner(msg.caller)); // or _onlyIctcAdmin(msg.caller)
         if (Option.isNull(Array.find(ictc_admins, func (t: Principal): Bool{ t == _admin }))){
             ictc_admins := Tools.arrayAppend(ictc_admins, [_admin]);
         };
     };
+
+    /// Remove an ICTC administrator.
     public shared(msg) func ictc_removeAdmin(_admin: Principal) : async (){
         assert(_onlyOwner(msg.caller)); // or _onlyIctcAdmin(msg.caller)
         ictc_admins := Array.filter(ictc_admins, func (t: Principal): Bool{ t != _admin });
     };
 
-    // SagaTM Scan
+    /// Returns ICTC TM type.
     public query func ictc_TM() : async Text{
         return "Saga";
     };
-    /// Saga
+
+    /// Returns ICTC TO number.
     public query func ictc_getTOCount() : async Nat{
         return _getSaga().count();
     };
+
+    /// Returns an ICTC TO.
     public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order<CustomCallType>{
         return _getSaga().getOrder(_toid);
     };
+
+    /// Returns ICTC TOs.
     public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getOrders(_page, _size);
     };
+
+    /// Returns an ICTC TO pool in process.
     public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order<CustomCallType>)]{
         return _getSaga().getAliveOrders();
     };
+
+    /// Returns an ICTC TT.
     public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent<CustomCallType>{
         return _getSaga().getActuator().getTaskEvent(_ttid);
     };
+
+    /// Returns ICTC TTs according to the specified TO.
     public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent<CustomCallType>]{
         return _getSaga().getTaskEvents(_toid);
     };
+
+    /// Returns ICTC TTs.
     public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getTaskEvents(_page, _size);
     };
+
+    /// Returns an ICTC TT pool in process.
     public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task<CustomCallType>)]{
         let pool = _getSaga().getActuator().getTaskPool();
         let arr = Array.map<(SagaTM.Ttid, SagaTM.Task<CustomCallType>), (SagaTM.Ttid, SagaTM.Task<CustomCallType>)>(pool, 
@@ -1907,28 +2068,37 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         });
         return arr;
     };
+
+    /// Returns the TTs that were in error.
     public query func ictc_getTTErrors(_page: Nat, _size: Nat) : async {data: [(Nat, SagaTM.ErrorLog)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getErrorLogs(_page, _size);
     };
+
+    /// Returns a callee's status.
     public query func ictc_getCalleeStatus(_callee: Principal) : async ?SagaTM.CalleeStatus{
         return _getSaga().getActuator().calleeStatus(_callee);
     };
 
-    // Transaction Governance
+    /// Clears the ICTC logs.
     public shared(msg) func ictc_clearLog(_expiration: ?Int, _delForced: Bool) : async (){ // Warning: Execute this method with caution
         assert(_onlyOwner(msg.caller));
         _getSaga().clear(_expiration, _delForced);
     };
+
+    /// Clears TT pool in process.
     public shared(msg) func ictc_clearTTPool() : async (){ // Warning: Execute this method with caution
         assert(_onlyOwner(msg.caller));
         _getSaga().getActuator().clearTasks();
     };
+
+    /// Blocks a TO.
     public shared(msg) func ictc_blockTO(_toid: SagaTM.Toid) : async ?SagaTM.Toid{
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         assert(not(_onlyBlocking(_toid)));
         let saga = _getSaga();
         return saga.block(_toid);
     };
+
     // public shared(msg) func ictc_removeTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid) : async ?SagaTM.Ttid{ // Warning: Execute this method with caution
     //     assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
     //     assert(_onlyBlocking(_toid));
@@ -1938,6 +2108,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     //     saga.close(_toid);
     //     return ttid;
     // };
+
+    /// Appends a TT to blocking TO.
     public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
         // Governance or manual compensation (operation allowed only when a transaction order is in blocking status).
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -1949,7 +2121,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         let ttid = saga.appendComp(_toid, Option.get(_forTtid, 0), taskRequest, null);
         return ttid;
     };
-    /// Try the task again
+
+    /// Try the TT again.
     public shared(msg) func ictc_redoTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid) : async ?SagaTM.Ttid{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -1958,7 +2131,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         await* _ictcSagaRun(_toid, true);
         return ttid;
     };
-    /// set status of pending task
+
+    /// Skips a TT, and set status.
     public shared(msg) func ictc_doneTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid, _toCallback: Bool) : async ?SagaTM.Ttid{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -1973,7 +2147,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             throw Error.reject("420: internal call error: "# Error.message(e)); 
         };
     };
-    /// set status of pending order
+
+    /// Skips a TO, and set status.
     public shared(msg) func ictc_doneTO(_toid: SagaTM.Toid, _status: SagaTM.OrderStatus, _toCallback: Bool) : async Bool{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -1989,7 +2164,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             throw Error.reject("420: internal call error: "# Error.message(e)); 
         };
     };
-    /// Complete blocking order
+
+    /// Complete a TO.
     public shared(msg) func ictc_completeTO(_toid: SagaTM.Toid, _status: SagaTM.OrderStatus) : async Bool{
         // After governance or manual compensations, this method needs to be called to complete the transaction order.
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -2007,6 +2183,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             throw Error.reject("430: ICTC error: "# Error.message(e)); 
         };
     };
+
+    /// Runs ICTC and updates the status of the specified TO.
     public shared(msg) func ictc_runTO(_toid: SagaTM.Toid) : async ?SagaTM.OrderStatus{
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         let saga = _getSaga();
@@ -2021,6 +2199,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             throw Error.reject("430: ICTC error: "# Error.message(e)); 
         };
     };
+
+    /// Runs ICTC.
     public shared(msg) func ictc_runTT() : async Bool{ 
         // There is no need to call it normally, but can be called if you want to execute tasks in time when a TO is in the Doing state.
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller) or _notPaused());
@@ -2042,6 +2222,11 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     /* ===========================
       DRC207 section
     ============================== */
+    // Default blackhole canister: 7hdtw-jqaaa-aaaak-aaccq-cai
+    // ModuleHash(dfx: 0.8.4): 603692eda4a0c322caccaff93cf4a21dc44aebad6d71b40ecefebef89e55f3be
+    // Github: https://github.com/iclighthouse/ICMonitor/blob/main/Blackhole.mo
+
+    /// Returns the monitorability configuration of the canister.
     public query func drc207() : async DRC207.DRC207Support{
         return {
             monitorable_by_self = false;
@@ -2050,26 +2235,27 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             timer = { enable = false; interval_seconds = null; }; 
         };
     };
-    /// canister_status
-    // public shared(msg) func canister_status() : async DRC207.canister_status {
-    //     // _sessionPush(msg.caller);
-    //     // if (_tps(15, null).1 > setting.MAX_TPS*5 or _tps(15, ?msg.caller).0 > 2){ 
-    //     //     assert(false); 
-    //     // };
-    //     let ic : DRC207.IC = actor("aaaaa-aa");
-    //     await ic.canister_status({ canister_id = Principal.fromActor(this) });
-    // };
-    // receive cycles
+
+    /// Receives cycles
     public func wallet_receive(): async (){
         let amout = Cycles.available();
         let _accepted = Cycles.accept<system>(amout);
     };
-    /// timer tick
-    // public shared(msg) func timer_tick(): async (){
-    //     //
-    // };
-    //
 
+    // /// Withdraw cycles
+    // public shared(msg) func withdraw_cycles(_amount: Nat, _to: Principal) : async (){
+    //     assert(_onlyOwner(msg.caller));
+    //     type Wallet = actor{ wallet_receive : shared () -> async (); };
+    //     let wallet : Wallet = actor(Principal.toText(_to));
+    //     let amount = Cycles.balance();
+    //     assert(_amount + 20_000_000_000 < amount);
+    //     Cycles.add<system>(_amount);
+    //     await wallet.wallet_receive();
+    // };
+
+    /* ===========================
+      Timer section
+    ============================== */
     private func timerLoop() : async (){
         if (_now() > lastMonitorTime + 24 * 3600){
             if (Trie.size(cyclesMonitor) == 0){
@@ -2085,11 +2271,15 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         try{ await* _reconciliation(); }catch(e){};
     };
     private var timerId: Nat = 0;
+
+    /// Start the Timer, it will be started automatically when upgrading the canister.
     public shared(msg) func timerStart(_intervalSeconds: Nat): async (){
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);
         timerId := Timer.recurringTimer<system>(#seconds(_intervalSeconds), timerLoop);
     };
+
+    /// Stop the Timer
     public shared(msg) func timerStop(): async (){
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);

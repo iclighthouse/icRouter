@@ -1,0 +1,947 @@
+type Account = record { owner : principal; subaccount : opt blob };
+type AccountId = blob;
+type AccountId__1 = blob;
+type AccountId__2 = blob;
+type Account__1 = record { owner : principal; subaccount : opt blob };
+type Account__2 = record { owner : principal; subaccount : opt blob };
+type Account__3 = record { owner : principal; subaccount : opt Subaccount };
+type Account__4 = record { owner : principal; subaccount : opt blob };
+type Address = text;
+type Address__1 = text;
+type Address__2 = text;
+type Address__3 = text;
+type Amount = nat;
+type ApproveArgs = record {
+  fee : opt nat;
+  memo : opt blob;
+  from_subaccount : opt blob;
+  created_at_time : opt nat64;
+  amount : nat;
+  expected_allowance : opt nat;
+  expires_at : opt nat64;
+  spender : Account__3;
+};
+type ApproveError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  AllowanceChanged : record { current_allowance : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  Expired : record { ledger_time : nat64 };
+  InsufficientFunds : record { balance : nat };
+};
+type Attempts = nat;
+type BackupRequest = variant {
+  sendingBTC;
+  accountUtxos;
+  icEvents;
+  icAccountEvents;
+  kyt_txAccounts;
+  cyclesMonitor;
+  kyt_accountAddresses;
+  kyt_addressAccounts;
+  otherData;
+  minterUtxos;
+  icrc1WasmHistory;
+  retrieveBTC;
+};
+type BackupResponse = variant {
+  sendingBTC : vec record { TxIndex__2; SendingBtcStatus };
+  accountUtxos : vec record {
+    Address__2;
+    record { PubKey__2; DerivationPath__2; vec Utxo__1 };
+  };
+  icEvents : vec record { BlockHeight; record { Event; Timestamp } };
+  icAccountEvents : vec record { AccountId; vec BlockHeight };
+  kyt_txAccounts : vec record {
+    HashId;
+    vec record { ChainAccount; ICAccount };
+  };
+  cyclesMonitor : vec record { principal; nat };
+  kyt_accountAddresses : vec record { AccountId; vec ChainAccount };
+  kyt_addressAccounts : vec record { Address__2; vec ICAccount };
+  otherData : record {
+    txInProcess : vec TxIndex__2;
+    totalBtcFee : nat64;
+    minterRemainingBalance : nat64;
+    txIndex : TxIndex__2;
+    totalBtcSent : nat64;
+    eventBlockIndex : nat;
+    firstTxIndex : TxIndex__2;
+    feeBalance : nat64;
+    totalBtcReceiving : nat64;
+    firstBlockIndex : nat;
+    ictc_admins : vec principal;
+  };
+  minterUtxos : record { vec VaultUtxo__1; vec VaultUtxo__1 };
+  icrc1WasmHistory : vec record { blob; text };
+  retrieveBTC : vec record { EventBlockHeight__1; RetrieveStatus };
+};
+type BalanceStats = record {
+  feeBalance : nat;
+  totalSupply : nat;
+  minterBalance : nat;
+  nativeBalance : nat;
+};
+type BlobFill = variant { AutoFill; ManualFill : blob };
+type BlockHash = blob;
+type BlockHeight = nat;
+type CallType = variant {
+  __block;
+  ICRC1 : variant { icrc1_transfer : TransferArgs };
+  ICRC2 : variant {
+    icrc2_approve : ApproveArgs;
+    icrc2_transfer_from : TransferFromArgs;
+  };
+  custom : CustomCallType;
+  DRC20 : variant {
+    drc20_transferBatch : record {
+      vec To;
+      vec Amount;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_approve : record { Spender; Amount; opt Nonce; opt Sa__1; opt Data };
+    drc20_transferFrom : record {
+      From;
+      To;
+      Amount;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_lockTransferFrom : record {
+      From;
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_dropAccount : opt Sa__1;
+    drc20_lockTransfer : record {
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_transfer : record { To; Amount; opt Nonce; opt Sa__1; opt Data };
+    drc20_executeTransfer : record {
+      BlobFill;
+      ExecuteType;
+      opt To;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+  };
+  __skip;
+};
+type CallType__1 = variant {
+  __block;
+  ICRC1 : variant { icrc1_transfer : TransferArgs };
+  ICRC2 : variant {
+    icrc2_approve : ApproveArgs;
+    icrc2_transfer_from : TransferFromArgs;
+  };
+  custom : CustomCallType;
+  DRC20 : variant {
+    drc20_transferBatch : record {
+      vec To;
+      vec Amount;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_approve : record { Spender; Amount; opt Nonce; opt Sa__1; opt Data };
+    drc20_transferFrom : record {
+      From;
+      To;
+      Amount;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_lockTransferFrom : record {
+      From;
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_dropAccount : opt Sa__1;
+    drc20_lockTransfer : record {
+      To;
+      Amount;
+      Timeout;
+      opt Decider;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+    drc20_transfer : record { To; Amount; opt Nonce; opt Sa__1; opt Data };
+    drc20_executeTransfer : record {
+      BlobFill;
+      ExecuteType;
+      opt To;
+      opt Nonce;
+      opt Sa__1;
+      opt Data;
+    };
+  };
+  __skip;
+};
+type Callee = principal;
+type CalleeStatus = record {
+  continuousFailure : nat;
+  successCount : nat;
+  failureCount : nat;
+};
+type Chain = text;
+type ChainAccount = record { Chain; TokenId; Address__2 };
+type ChainAccount__1 = record { Chain__1; TokenId__1; Address__3 };
+type Chain__1 = text;
+type CompStrategy = variant { Backward; Forward };
+type CompTask = record {
+  status : Status__2;
+  comp : Compensation;
+  tcid : Tcid;
+  forTtid : Ttid;
+};
+type Compensation = record {
+  preTtid : vec Ttid__1;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee;
+  forTtid : opt Ttid__1;
+};
+type CustomCallType = variant { sendTx : record { nat; blob }; buildTx : nat };
+type DRC207Support = record {
+  timer : record { interval_seconds : opt nat; enable : bool };
+  monitorable_by_self : bool;
+  monitorable_by_blackhole : record {
+    canister_id : opt principal;
+    allowed : bool;
+  };
+  cycles_receivable : bool;
+};
+type Data = blob;
+type Decider = text;
+type DerivationPath = vec blob;
+type DerivationPath__1 = vec blob;
+type DerivationPath__2 = vec blob;
+type Err = record { code : ErrorCode; message : text };
+type ErrorCode = variant {
+  canister_error;
+  call_error : record { err_code : nat32 };
+  system_transient;
+  future : nat32;
+  canister_reject;
+  destination_invalid;
+  system_fatal;
+};
+type ErrorLog = record {
+  result : opt TaskResult;
+  time : Time;
+  ttid : Ttid__1;
+  callee : opt Callee;
+};
+type Event = variant {
+  received_utxos : record {
+    deposit_address : text;
+    total_fee : nat;
+    to_account : Account__1;
+    utxos : vec Utxo__2;
+    amount : nat;
+  };
+  sent_transaction : record {
+    change_output : opt record { value : nat64; vout : nat32 };
+    txid : text;
+    address : text;
+    account : Account__1;
+    utxos : vec Utxo__2;
+    requests : vec nat64;
+    retrieveAccount : Account__1;
+  };
+  burn : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : text;
+    account : Account__1;
+    amount : nat;
+    tokenBlockIndex : nat;
+  };
+  mint : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : text;
+    account : Account__1;
+    amount : nat;
+  };
+  send : record {
+    to : Account__1;
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    amount : nat;
+  };
+  changeOwner : record { newOwner : principal };
+  accepted_retrieve_btc_request : record {
+    txi : TxIndex__1;
+    icrc1_burned_txid : nat;
+    total_fee : nat;
+    address : text;
+    account : Account__1;
+    amount : nat64;
+  };
+  start : record { message : opt text };
+  initOrUpgrade : record { initArgs : InitArgs };
+  config : record {
+    setting : variant {
+      upgradeTokenWasm : record {
+        icTokenCanisterId : principal;
+        version : text;
+        symbol : text;
+      };
+      setTokenWasm : record { size : nat; version : text };
+    };
+  };
+  suspend : record { message : opt text };
+};
+type EventBlockHeight = nat;
+type EventBlockHeight__1 = nat;
+type Event__1 = variant {
+  received_utxos : record {
+    deposit_address : text;
+    total_fee : nat;
+    to_account : Account__1;
+    utxos : vec Utxo__2;
+    amount : nat;
+  };
+  sent_transaction : record {
+    change_output : opt record { value : nat64; vout : nat32 };
+    txid : text;
+    address : text;
+    account : Account__1;
+    utxos : vec Utxo__2;
+    requests : vec nat64;
+    retrieveAccount : Account__1;
+  };
+  burn : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : text;
+    account : Account__1;
+    amount : nat;
+    tokenBlockIndex : nat;
+  };
+  mint : record {
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    address : text;
+    account : Account__1;
+    amount : nat;
+  };
+  send : record {
+    to : Account__1;
+    toid : opt nat;
+    icTokenCanisterId : principal;
+    amount : nat;
+  };
+  changeOwner : record { newOwner : principal };
+  accepted_retrieve_btc_request : record {
+    txi : TxIndex__1;
+    icrc1_burned_txid : nat;
+    total_fee : nat;
+    address : text;
+    account : Account__1;
+    amount : nat64;
+  };
+  start : record { message : opt text };
+  initOrUpgrade : record { initArgs : InitArgs };
+  config : record {
+    setting : variant {
+      upgradeTokenWasm : record {
+        icTokenCanisterId : principal;
+        version : text;
+        symbol : text;
+      };
+      setTokenWasm : record { size : nat; version : text };
+    };
+  };
+  suspend : record { message : opt text };
+};
+type ExecuteType = variant { fallback; send : nat; sendAll };
+type From = text;
+type GetUtxosResponse = record {
+  next_page : opt Page;
+  tip_height : nat32;
+  tip_block_hash : BlockHash;
+  utxos : vec Utxo__1;
+};
+type HashId = blob;
+type ICAccount = record { TokenCanisterId; Account__2 };
+type ICAccount__1 = record { TokenCanisterId__1; Account__4 };
+type ICUtxo = record { height : nat32; value : Satoshi; outpoint : OutPoint };
+type ICUtxo__1 = record {
+  height : nat32;
+  value : Satoshi;
+  outpoint : OutPoint;
+};
+type InitArgs = record {
+  fixed_fee : nat;
+  retrieve_btc_min_amount : nat64;
+  dex_pair : opt principal;
+  min_confirmations : opt nat32;
+};
+type Instruction = variant { opcode : Opcode; data : blob };
+type List = opt record { CompTask; List };
+type ListPage = nat;
+type ListSize = nat;
+type List_1 = opt record { SagaTask; List_1 };
+type Network = variant { Mainnet; Regtest; Testnet };
+type Nonce = nat;
+type Opcode = variant {
+  OP_NUMEQUALVERIFY;
+  OP_RIGHT;
+  OP_CODESEPARATOR;
+  OP_LESSTHANOREQUAL;
+  OP_CHECKMULTISIGVERIFY;
+  OP_EQUALVERIFY;
+  OP_NUMEQUAL;
+  OP_FALSE;
+  OP_INVALIDOPCODE;
+  OP_RETURN;
+  OP_HASH160;
+  OP_HASH256;
+  OP_CHECKSIG;
+  OP_RSHIFT;
+  OP_FROMALTSTACK;
+  OP_0;
+  OP_1;
+  OP_2;
+  OP_3;
+  OP_4;
+  OP_5;
+  OP_6;
+  OP_7;
+  OP_8;
+  OP_9;
+  OP_SHA256;
+  OP_0NOTEQUAL;
+  OP_CHECKSEQUENCEVERIFY;
+  OP_VERIF;
+  OP_RESERVED1;
+  OP_RESERVED2;
+  OP_GREATERTHANOREQUAL;
+  OP_PUSHDATA1;
+  OP_PUSHDATA2;
+  OP_PUSHDATA4;
+  OP_CHECKLOCKTIMEVERIFY;
+  OP_WITHIN;
+  OP_VERNOTIF;
+  OP_BOOLAND;
+  OP_BOOLOR;
+  OP_CHECKSIGADD;
+  OP_NEGATE;
+  OP_LESSTHAN;
+  OP_1NEGATE;
+  OP_TOALTSTACK;
+  OP_ENDIF;
+  OP_EQUAL;
+  OP_2DROP;
+  OP_NUMNOTEQUAL;
+  OP_2OVER;
+  OP_2SWAP;
+  OP_1ADD;
+  OP_1SUB;
+  OP_2DIV;
+  OP_2DUP;
+  OP_2MUL;
+  OP_2ROT;
+  OP_GREATERTHAN;
+  OP_3DUP;
+  OP_10;
+  OP_11;
+  OP_12;
+  OP_13;
+  OP_14;
+  OP_15;
+  OP_16;
+  OP_IF;
+  OP_OR;
+  OP_DROP;
+  OP_ELSE;
+  OP_SUBSTR;
+  OP_LEFT;
+  OP_NOP1;
+  OP_NOP2;
+  OP_NOP3;
+  OP_NOP4;
+  OP_NOP5;
+  OP_NOP6;
+  OP_NOP7;
+  OP_NOP8;
+  OP_NOP9;
+  OP_INVERT;
+  OP_OVER;
+  OP_PICK;
+  OP_VERIFY;
+  OP_ROLL;
+  OP_SHA1;
+  OP_SIZE;
+  OP_SWAP;
+  OP_TRUE;
+  OP_TUCK;
+  OP_NOP10;
+  OP_NOTIF;
+  OP_LSHIFT;
+  OP_RESERVED;
+  OP_CHECKMULTISIG;
+  OP_IFDUP;
+  OP_CHECKSIGVERIFY;
+  OP_RIPEMD160;
+  OP_ABS;
+  OP_ADD;
+  OP_AND;
+  OP_CAT;
+  OP_DIV;
+  OP_DUP;
+  OP_MAX;
+  OP_MIN;
+  OP_MOD;
+  OP_MUL;
+  OP_NIP;
+  OP_NOP;
+  OP_NOT;
+  OP_ROT;
+  OP_SUB;
+  OP_VER;
+  OP_XOR;
+  OP_DEPTH;
+};
+type Order = record {
+  status : OrderStatus;
+  tasks : List_1;
+  callbackStatus : opt Status__2;
+  data : opt blob;
+  name : text;
+  comps : List;
+  time : Time;
+  compStrategy : CompStrategy;
+  allowPushing : variant { Opening; Closed };
+};
+type OrderStatus = variant {
+  Done;
+  Todo;
+  Doing;
+  Recovered;
+  Compensating;
+  Blocking;
+};
+type OutPoint = record { txid : blob; vout : nat32 };
+type Page = blob;
+type PubKey = blob;
+type PubKey__1 = blob;
+type PubKey__2 = blob;
+type Receipt = variant {
+  result : opt Return;
+  ICRC1 : variant {
+    icrc1_transfer : variant { Ok : nat; Err : TransferError };
+  };
+  ICRC2 : variant {
+    icrc2_approve : variant { Ok : nat; Err : ApproveError };
+    icrc2_transfer_from : variant { Ok : nat; Err : TransferFromError };
+  };
+  none;
+  DRC20 : variant {
+    drc20_transferBatch : vec TxnResult;
+    drc20_approve : TxnResult;
+    drc20_transferFrom : TxnResult;
+    drc20_lockTransferFrom : TxnResult;
+    drc20_dropAccount;
+    drc20_lockTransfer : TxnResult;
+    drc20_transfer : TxnResult;
+    drc20_executeTransfer : TxnResult;
+  };
+};
+type RetrieveBtcArgs = record { address : text; amount : nat64 };
+type RetrieveBtcError = variant {
+  MalformedAddress : text;
+  GenericError : record { error_message : text; error_code : nat64 };
+  TemporarilyUnavailable : text;
+  AlreadyProcessing;
+  AmountTooLow : nat64;
+  InsufficientFunds : record { balance : nat64 };
+};
+type RetrieveBtcOk = record { block_index : nat64 };
+type RetrieveBtcStatus = variant {
+  Signing;
+  Confirmed : record { txid : blob };
+  Sending : record { txid : blob };
+  AmountTooLow;
+  Unknown;
+  Submitted : record { txid : blob };
+  Pending;
+};
+type RetrieveStatus = record {
+  txIndex : nat;
+  account : Account__1;
+  btcAddress : Address__1;
+  burnedBlockIndex : nat;
+  amount : nat64;
+  retrieveAccount : Account__1;
+};
+type Return = record { blob; text };
+type Sa = blob;
+type Sa__1 = blob;
+type SagaTask = record {
+  status : Status__2;
+  comp : opt Compensation;
+  task : Task__1;
+  ttid : Ttid;
+};
+type Satoshi = nat64;
+type Script = vec Instruction;
+type SendingBtcStatus = record {
+  fee : nat64;
+  status : RetrieveBtcStatus;
+  toids : vec nat;
+  scriptSigs : vec Script;
+  signedTx : opt blob;
+  totalAmount : nat64;
+  destinations : vec record { nat64; Address__1; nat64 };
+  utxos : vec VaultUtxo;
+};
+type Spender = text;
+type Status = variant { Error; Done; Todo; Doing; Unknown };
+type Status__1 = variant { Error; Done; Todo; Doing; Unknown };
+type Status__2 = variant { Error; Done; Todo; Doing; Unknown };
+type Subaccount = blob;
+type Task = record {
+  preTtid : vec Ttid__1;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee;
+  forTtid : opt Ttid__1;
+};
+type TaskEvent = record {
+  result : TaskResult;
+  callbackStatus : opt Status;
+  task : Task;
+  time : Time;
+  toid : opt Toid__1;
+  ttid : Ttid__1;
+  attempts : Attempts;
+  txHash : blob;
+};
+type TaskResult = record { Status__1; opt Receipt; opt Err };
+type Task__1 = record {
+  preTtid : vec Ttid__1;
+  data : opt blob;
+  time : Time;
+  toid : opt Toid__1;
+  callType : CallType;
+  cycles : nat;
+  recallInterval : int;
+  attemptsMax : Attempts;
+  callee : Callee;
+  forTtid : opt Ttid__1;
+};
+type Tcid = nat;
+type Time = int;
+type Timeout = nat32;
+type Timestamp = nat;
+type Timestamp__1 = nat64;
+type Timestamp__2 = nat;
+type Timestamp__3 = nat;
+type To = text;
+type Toid = nat;
+type Toid__1 = nat;
+type TokenCanisterId = principal;
+type TokenCanisterId__1 = principal;
+type TokenId = blob;
+type TokenId__1 = blob;
+type TokenInfo = record {
+  decimals : nat8;
+  dexPrice : opt record { float64; Timestamp__3 };
+  minAmount : nat;
+  fixedFee : nat;
+  totalSupply : opt nat;
+  ckLedgerId : principal;
+  ckSymbol : text;
+  dexPair : opt principal;
+  symbol : text;
+};
+type TransferArgs = record {
+  to : Account__3;
+  fee : opt nat;
+  memo : opt blob;
+  from_subaccount : opt Subaccount;
+  created_at_time : opt Timestamp__1;
+  amount : nat;
+};
+type TransferError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type TransferFromArgs = record {
+  to : Account__3;
+  fee : opt nat;
+  spender_subaccount : opt blob;
+  from : Account__3;
+  memo : opt blob;
+  created_at_time : opt nat64;
+  amount : nat;
+};
+type TransferFromError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  InsufficientAllowance : record { allowance : nat };
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type TrieList = record {
+  total : nat;
+  data : vec record { TxIndex; SendingBtcStatus };
+  totalPage : nat;
+};
+type TrieList_1 = record {
+  total : nat;
+  data : vec record { EventBlockHeight; RetrieveStatus };
+  totalPage : nat;
+};
+type TrieList_2 = record {
+  total : nat;
+  data : vec record { EventBlockHeight; record { Event__1; Timestamp__2 } };
+  totalPage : nat;
+};
+type Ttid = nat;
+type Ttid__1 = nat;
+type TxHash = text;
+type TxIndex = nat;
+type TxIndex__1 = nat;
+type TxIndex__2 = nat;
+type Txid = blob;
+type TxnResult = variant {
+  ok : Txid;
+  err : record {
+    code : variant {
+      NonceError;
+      InsufficientGas;
+      InsufficientAllowance;
+      UndefinedError;
+      InsufficientBalance;
+      NoLockedTransfer;
+      DuplicateExecutedTransfer;
+      LockedTransferExpired;
+    };
+    message : text;
+  };
+};
+type UpdateBalanceError = variant {
+  GenericError : record { error_message : text; error_code : nat64 };
+  TemporarilyUnavailable : text;
+  AlreadyProcessing;
+  NoNewUtxos;
+};
+type UpdateBalanceResult = record { block_index : nat64; amount : nat64 };
+type Utxo = record { height : nat32; value : Satoshi; outpoint : OutPoint };
+type Utxo__1 = record { height : nat32; value : Satoshi; outpoint : OutPoint };
+type Utxo__2 = record {
+  height : nat32;
+  value : nat64;
+  outpoint : record { txid : blob; vout : nat32 };
+};
+type VaultUtxo = record { Address__1; PubKey__1; DerivationPath__1; ICUtxo };
+type VaultUtxo__1 = record {
+  Address__2;
+  PubKey__2;
+  DerivationPath__2;
+  ICUtxo__1;
+};
+type icBTCMinter = service {
+  allocateRewards : (Account, nat, bool) -> (bool);
+  backup : (BackupRequest) -> (BackupResponse);
+  batch_send : (opt nat) -> (bool);
+  changeOwner : (principal) -> (bool);
+  clearEvents : (EventBlockHeight, EventBlockHeight) -> ();
+  clearSendingTxs : (TxIndex, TxIndex) -> ();
+  debug_charge_address : () -> (text);
+  debug_get_utxos : (Address) -> (GetUtxosResponse);
+  debug_reSendBTC : (nat, nat) -> ();
+  debug_reconciliation : () -> ();
+  debug_sendingBTC : (opt nat) -> (opt text) query;
+  drc207 : () -> (DRC207Support) query;
+  getCkTokenWasmHistory : () -> (vec record { text; nat }) query;
+  getCkTokenWasmVersion : () -> (text, nat) query;
+  getOwner : () -> (principal) query;
+  get_account_events : (AccountId__2) -> (
+      vec record { Event__1; Timestamp__2 },
+    ) query;
+  get_btc_address : (Account) -> (text);
+  get_cached_account : (Address__3) -> (opt vec ICAccount__1) query;
+  get_cached_address : (AccountId__1) -> (opt vec ChainAccount__1) query;
+  get_cached_tx_account : (TxHash) -> (
+      opt vec record { ChainAccount__1; ICAccount__1 },
+    ) query;
+  get_ck_tokens : () -> (vec TokenInfo) query;
+  get_event : (EventBlockHeight) -> (
+      opt record { Event__1; Timestamp__2 },
+    ) query;
+  get_event_count : () -> (nat) query;
+  get_event_first_index : () -> (EventBlockHeight) query;
+  get_events : (opt ListPage, opt ListSize) -> (TrieList_2) query;
+  get_minter_info : () -> (
+      record {
+        btcFee : nat64;
+        minVisitInterval : nat;
+        btcRetrieveFee : nat64;
+        btcMintFee : nat64;
+        btcNetwork : Network;
+        icBTCFee : nat;
+        version : text;
+        icBTC : principal;
+        btcMinAmount : nat64;
+        minter_address : Address;
+        enDebug : bool;
+        minConfirmations : nat32;
+        paused : bool;
+      },
+    ) query;
+  get_withdrawal_account : (Account) -> (Account__1) query;
+  ictc_TM : () -> (text) query;
+  ictc_addAdmin : (principal) -> ();
+  ictc_appendTT : (
+      opt blob,
+      Toid,
+      opt Ttid,
+      principal,
+      CallType__1,
+      vec Ttid,
+    ) -> (Ttid);
+  ictc_blockTO : (Toid) -> (opt Toid);
+  ictc_clearLog : (opt int, bool) -> ();
+  ictc_clearTTPool : () -> ();
+  ictc_completeTO : (Toid, OrderStatus) -> (bool);
+  ictc_doneTO : (Toid, OrderStatus, bool) -> (bool);
+  ictc_doneTT : (Toid, Ttid, bool) -> (opt Ttid);
+  ictc_getAdmins : () -> (vec principal) query;
+  ictc_getCalleeStatus : (principal) -> (opt CalleeStatus) query;
+  ictc_getTO : (Toid) -> (opt Order) query;
+  ictc_getTOCount : () -> (nat) query;
+  ictc_getTOPool : () -> (vec record { Toid; opt Order }) query;
+  ictc_getTOs : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { Toid; Order };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_getTT : (Ttid) -> (opt TaskEvent) query;
+  ictc_getTTByTO : (Toid) -> (vec TaskEvent) query;
+  ictc_getTTErrors : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { nat; ErrorLog };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_getTTPool : () -> (vec record { Ttid; Task__1 }) query;
+  ictc_getTTs : (nat, nat) -> (
+      record {
+        total : nat;
+        data : vec record { Ttid; TaskEvent };
+        totalPage : nat;
+      },
+    ) query;
+  ictc_redoTT : (Toid, Ttid) -> (opt Ttid);
+  ictc_removeAdmin : (principal) -> ();
+  ictc_runTO : (Toid) -> (opt OrderStatus);
+  ictc_runTT : () -> (bool);
+  launchToken : (
+      record {
+        totalSupply : opt nat;
+        ckTokenName : text;
+        ckTokenFee : nat;
+        ckTokenDecimals : nat8;
+        ckTokenSymbol : text;
+      },
+    ) -> (principal);
+  monitor_canisters : () -> (vec record { principal; nat }) query;
+  monitor_put : (principal) -> ();
+  monitor_remove : (principal) -> ();
+  recovery : (BackupResponse) -> (bool);
+  retrieval_log : (opt nat64) -> (opt RetrieveStatus) query;
+  retrieval_log_list : (opt ListPage, opt ListSize) -> (TrieList_1) query;
+  retrieve_btc : (RetrieveBtcArgs, opt Sa) -> (
+      variant { Ok : RetrieveBtcOk; Err : RetrieveBtcError },
+    );
+  retrieve_btc_status : (record { block_index : nat64 }) -> (
+      RetrieveBtcStatus,
+    ) query;
+  sending_log : (opt nat) -> (opt SendingBtcStatus) query;
+  sending_log_list : (opt ListPage, opt ListSize) -> (TrieList) query;
+  setCkTokenWasm : (blob, text) -> ();
+  setPause : (bool) -> (bool);
+  setTokenLogo : (principal, text) -> (bool);
+  stats : () -> (
+      record {
+        totalBtcFee : nat64;
+        countRejections : nat;
+        txIndex : nat;
+        totalBtcSent : nat64;
+        feeBalance : nat64;
+        totalBtcReceiving : nat64;
+        blockIndex : nat64;
+        vaultRemainingBalance : nat64;
+        countAsyncMessage : nat;
+      },
+    ) query;
+  timerStart : (nat) -> ();
+  timerStop : () -> ();
+  updateMinterBalance : (bool) -> (
+      record { pre : BalanceStats; post : BalanceStats; shortfall : nat },
+    );
+  update_balance : (Account) -> (
+      variant { Ok : UpdateBalanceResult; Err : UpdateBalanceError },
+    );
+  upgradeToken : (principal, text) -> (text);
+  utxos : (Address) -> (opt record { PubKey; DerivationPath; vec Utxo }) query;
+  vaultUtxos : () -> (
+      nat64,
+      vec record { Address; PubKey; DerivationPath; Utxo },
+    ) query;
+  wallet_receive : () -> ();
+};
+service : icBTCMinter
