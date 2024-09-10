@@ -4,6 +4,88 @@
  * Stability  : Experimental
  * Github     : https://github.com/iclighthouse/
  */
+///
+/// ## Overview
+///
+/// The integration of ethereum on the IC network without bridges is achieved through chain-key (threshold signature) 
+/// technology for ECDSA signatures, and the smart contracts of IC can directly access the RPC nodes of ethereum through 
+/// HTTPS Outcall technology. This is the technical solution implemented in stage 1, which can be decentralized by 
+/// configuring multiple RPC API providers. 
+/// 
+/// The user sends an ethereum asset, ETH or ERC20 token, to an address controlled by the IC smart contract (Minter), 
+/// which receives the ethereum asset and mint icETH or icERC20 token on the IC network at a 1:1 ratio. When users want 
+/// to retrieve the real ethereum asset, they only need to return icETH or icERC20 token to Minter smart contract to 
+/// retrieve the ethereum assets.
+/// 
+/// icRouter's ethMinter Canister enables communication with the external chain network by calling the chain-key interface 
+/// of the IC network, which has a dedicated subnet to provide block data and threshold ECDSA signatures, and to provide 
+/// consensus.
+///
+/// ## Concepts
+/// 
+/// ### TSS and chain-key
+///
+/// Threshold Signature Scheme (TSS) is a multi-signature scheme that does not require the exposure of private keys and is well 
+/// suited for 100% chain implementation of cross-chain transactions, which is also referred to as chain-key technology on IC.
+///
+/// ### External Chain and Coordinating chain
+/// 
+/// External Chain is a blockchain that integrates with IC network, such as ethereum network.  
+/// Coordinating chain is the blockchain where decentralised cross-chain smart contracts are located, in this case IC.
+///
+/// ### Original token and Wrapped token
+/// 
+/// Original tokens are tokens issued on external chain, such as ETH.  
+/// Wrapped tokens are tokens that have been wrapped by a smart contract with a 1:1 correspondence and issued on IC, such as icETH.
+///
+/// ## How it works
+///
+/// ### Minting and Retrieval
+///
+/// Minting is the process of locking the original tokens of external chain into the Minter contract of the coordinating chain 
+/// and issuing the corresponding wrapped tokens. Retrieval is burning the wrapped tokens and sending the corresponding original 
+/// tokens in the Minter contract to the holder.
+/// 
+/// ### Minting: ETH/ERC20 -> icETH/icERC20 (Method 1)
+/// 
+/// Method 1 Cross-chaining original tokens to the IC network requires three steps:
+/// - (1) The user calls get_deposit_address() method of ethMinter to get the deposit address of external chain, which is different 
+/// for each user. It has no plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
+/// - (2) The user sends original tokens in his/her wallet to the above deposit address.
+/// - (3) After waiting for external chain transaction confirmation, the user calls update_balance() method of ethMinter to mint the 
+/// corresponding wrapped tokens in IC network. Original tokens are controlled by the ethMinter canister, and the 1:1 corresponding 
+/// wrapped tokens are ICRC1 tokens on the IC network.
+/// 
+/// ### Minting: ETH/ERC20 -> icETH/icERC20 (Method 2)
+/// 
+/// Method 2 Cross-chaining original tokens to the IC network requires three steps:
+/// - (1) The user sends original tokens to the ethMinter pool address, which is controlled by the ethMinter but does not 
+/// have a plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
+/// - (2) The user signs an EIP712 signature in his wallet, which includes the above icRouter label, txid, the user's principal 
+/// in IC.
+/// - (3) The user calls ethMinter's claim() method, providing the txid and signature. ethMinter mints the corresponding 
+/// wrapped tokens on IC after checking the parameters and blockchain data.
+///
+/// ### Retrieval: icETH/icERC20 -> ETH/ERC20
+///
+/// Retrieving original tokens from the IC network requires three steps.
+/// - (1) The user gets the withdrawal address of external chain (owner is ethMinter canister-id, subaccount is user 
+/// account-id), or he can call ethMinter's get_withdrawal_account() method to get it (this is a query method, so 
+/// needs to pay attention to its security).
+/// - (2) The user sends wrapped tokens to the above withdrawal address and burns them.
+/// - (3) The user calls ethMinter's retrieve() method to provide his/her address of external chain and retrieve the 
+/// original tokens. In this process, the original tokens that were stored in the ethMinter canister 
+/// are sent to the destination address using the threshold signature technique.
+///
+/// ### RPC Whitelist and Keepers
+///
+/// icETHMinter sets up RPC whitelists and Keepers through governance, where Keepers submit RPC URLs. icETHMinter accesses 
+/// data from multiple RPC endpoints through http_outcall and forms consensus.
+///
+/// RPC Whitelist: RPC domains that are allowed to be added to icETHMinter, generally common RPC providers in the market.
+///
+/// Keepers: users who are added to ethMinter by governance to provide RPC URLs, they need to select RPC providers in the 
+/// RPC whitelist.
 
 import Prelude "mo:base/Prelude";
 import Prim "mo:prim";
@@ -48,23 +130,26 @@ import RpcCaller "lib/RpcCaller";
 import RpcRequest "lib/RpcRequest";
 import Backup "lib/BackupTypes";
 
-// Rules:
-//      When depositing ETH, each account is processed in its own single thread.
-// InitArgs = {
-//     min_confirmations : ?Nat
-//     rpc_confirmations: Nat;
-//     tx_type: {#EIP1559; #EIP2930; #Legacy};
-//     deposit_method: Nat8;
-//   };
-// Deploy:
-// 1. Deploy minter canister 
-// 2. addRpcWhitelist(domain)  setKeeper() and keeper_set_rpc()
-// 3. sync() and setPause(false)
-// 4. setCkTokenWasm() 
-// 5. launchToken() 
-// 6. setTokenDexPair() 
-// Min confirmations in Production: 64 - 96
-// "Ethereum/Sepolia", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true/false
+/// 
+/// ## Deployment
+/// 
+/// args:
+/// - initNetworkName: Text // External chain network name.
+/// - initSymbol: Text // Original token symbol.
+/// - initDecimals: Nat8 // Original token decimals.
+/// - initBlockSlot: Nat // External chain network block interval time in seconds.
+/// - initArgs:
+///     - min_confirmations : ?Nat; // Minimum number of confirmed blocks in external chain network.
+///     - rpc_confirmations: Nat; // The minimum number of confirmations required to call the RPC interface to form a consensus.
+///     - tx_type: {#EIP1559; #EIP2930; #Legacy}; // Transaction construction.
+///     - deposit_method: Nat8; // Methods to cross-chain original token from external chain to IC network. 1 - method1 enabled; 
+/// 2 - method2 enabled; 3 - method1 and method2 enabled.
+/// - enDebug: Bool; // Whether to start debugging.
+///
+/// ## API
+///
+
+// e.g. ("Ethereum/Sepolia", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true)
 shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs, enDebug: Bool) = this {
     assert(Option.get(initArgs.min_confirmations, 0) >= 64); /*config*/
 
@@ -402,7 +487,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                                 amount = null;
                                 nonce = null;
                                 toids = null;
-                                txHash = null; // ?ABI.toHex(txHash);
+                                txHash = null; 
                                 tx = ?txObj;
                                 rawTx = ?(rawTx, txHash);
                                 signedTx = null;
@@ -1582,7 +1667,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                         let tokenInfo = _getCkTokenInfo(tx.tokenId);
                         if (isERC20){
                             feeDiffEth := Nat.sub(feeNew.maxFee, tx.fee.maxFee);
-                            // feeDiff := 0; // feeDiffEth * tokenInfo.fee.ethRatio / gwei_;
                             if (tx.txType == #Withdraw){
                                 feeDiff := feeDiffEth * tokenInfo.fee.ethRatio / gwei_;
                             };
@@ -1929,12 +2013,12 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 switch(res){
                     case(#Ok(r)){
                         result := r;
-                        switch(ETHCrypto.getBytesFromJson(r, _jsonPath)){ //*
+                        switch(ETHCrypto.getBytesFromJson(r, _jsonPath)){
                             case(?(value)){ 
                                 ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, ?r, null);
                                 values := [#Raw(value)];
                                 status := #ok(values);
-                                possibleResult := ABI.toHex(value); //*
+                                possibleResult := ABI.toHex(value);
                             }; 
                             case(_){
                                 switch(ETHCrypto.getStringFromJson(r, "error/message")){
@@ -1950,7 +2034,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                             };
                         };
                     };
-                    case(#Err(e)){ //*
+                    case(#Err(e)){
                         ck_rpcLogs := RpcRequest.postRpcLog(ck_rpcLogs, id, null, ?e);
                         throw Error.reject(e);
                     };
@@ -1997,7 +2081,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 case(#ok(v)){ isConfirmed := true };
                 case(_){};
             };
-            if (possibleResult.size() > 0){ //*
+            if (possibleResult.size() > 0){
                 isConfirmed := true;
             };
         };
@@ -2032,7 +2116,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             var to : Text = switch(res[2]){ case(#Text(v)){ ETHCrypto.trimQuote(v) }; case(_){ "" } };
             var value : Nat = switch(res[3]){ case(#Nat(v)){ v }; case(_){ 0 } };
             var input : [Nat8] = switch(res[4]){ case(#Raw(v)){ v }; case(_){ [] } };
-            // var returns : ?Text = switch(res[5]){ case(#Text(v)){ ?v }; case(_){ null } };
             var nonce : ?Nat = switch(res[5]){ case(#Nat(v)){ ?v }; case(_){ null } };
             var confirmation: Status = #Unknown;
 
@@ -2239,7 +2322,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 if (tx.status == #Confirmed){
                     if (tx.txType == #Deposit){ // _isPending()
                         let isERC20 = tx.tokenId != eth_;
-                        let gasFee = tx.fee; //_getEthGas(tx.tokenId); // eth Wei // Getting the fee from the tx record
+                        let gasFee = tx.fee; // eth Wei // Getting the fee from the tx record
                         let ckFee = _getCkFeeForDepositing2(tx.tokenId, tx.fee); // {eth; token} Wei // Getting the fee from the tx record
                         var amount: Wei = tx.amount;
                         // Mint fee
@@ -2882,7 +2965,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
 
     /** Public functions **/
-    /// Deposit Method : 1
+    // Deposit Method : 1
+
+    /// Method-1: Returns the deposit address of external chain, which is different for each user. It has no plaintext private key and is decentrally 
+    /// controlled by a dedicated subnet of the IC using TSS technology.
     public shared(msg) func get_deposit_address(_account : Account): async EthAddress{
         assert(_notPaused() or _onlyOwner(msg.caller));
         assert(depositMethod == 1 or depositMethod == 3);
@@ -2903,6 +2989,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let account = await* _getEthAddress(accountId, false);
         return account.0;
     };
+
+    /// Method-1: Mint the corresponding wrapped tokens on IC after transferring original token to the deposit address.
     public shared(msg) func update_balance(_token: ?EthAddress, _account : Account) : async {
         #Ok : Minter.UpdateBalanceResult; 
         #Err : Minter.ResultError;
@@ -2917,10 +3005,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             throw Error.reject("403: The balance of canister's cycles is insufficient, increase the balance as soon as possible."); 
         };
         assert(depositMethod == 1 or depositMethod == 3);
-        // if (not(_checkAsyncMessageLimit())){
-        //     countRejections += 1; 
-        //     return #Err(#GenericError({code = 405; message="405: IC network is busy, please try again later."}));
-        // };
         if (_now() < _getLatestVisitTime(msg.caller) + MIN_VISIT_INTERVAL){
             return #Err(#GenericError({code = 400; message = "400: Access is allowed only once every " # Nat.toText(MIN_VISIT_INTERVAL) # " seconds!"}))
         };
@@ -2934,7 +3018,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         if (lastExecutionDuration > maxExecutionDuration) { maxExecutionDuration := lastExecutionDuration };
         return res;
     };
-    /// Deposit Method : 2
+
+    // Deposit Method : 2
+
+    /// Method-2: Claim (mint) wrapped tokens on IC by providing transaction txid on external chain and signature.
     public shared(msg) func claim(_account : Account, _txHash: TxHash, _signature: [Nat8]) : async {
         #Ok : BlockHeight; 
         #Err : Minter.ResultError;
@@ -2971,13 +3058,16 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             return #Ok(blockIndex);
         };
     };
-    /// Retrieve
+
+    /// Gets the withdrawal address of wrapped token. 
+    /// Note: It is a query method, so you need to pay attention to its security.
     public query func get_withdrawal_account(_account : Account) : async Minter.Account{
         // assert(_notPaused() or _onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
         return {owner=Principal.fromActor(this); subaccount=?Blob.toArray(accountId)};
     };
 
+    /// Provide address on external chain and retrieve the original token.
     public shared(msg) func retrieve(_token: ?EthAddress, _address: EthAddress, _amount: Wei, _sa: ?[Nat8]) : async { 
         #Ok : Minter.RetrieveResult; //{ block_index : Nat64 };
         #Err : Minter.ResultError;
@@ -3063,11 +3153,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
+
+    /// Re-build transaction (in response to low gas prices, etc.)
     public shared(msg) func cover_tx(_txi: TxIndex, _sa: ?[Nat8]) : async ?BlockHeight{
-        // if (not(_checkAsyncMessageLimit())){
-        //     countRejections += 1; 
-        //     throw Error.reject("405: IC network is busy, please try again later.");
-        // };
         _checkICTCError();
         if (not(_notPaused() or _onlyOwner(msg.caller))){
             throw Error.reject("400: The system has been suspended!");
@@ -3100,10 +3188,15 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         await* _syncTxStatus(_txi, true);
         return await* _coverTx(_txi, false, ?true, 0, true, true);
     };
-    /// Query Functions
+
+    // Query Functions
+
+    /// Returns external chain address of icETHMinter.
     public query func get_minter_address() : async (EthAddress, Nonce){
         return _getEthAddressQuery(_accountId(Principal.fromActor(this), null));
     };
+
+    /// Returns infomation of icETHMinter.
     public query func get_minter_info() : async MinterInfo{
         return {
             address = _getEthAddressQuery(_accountId(Principal.fromActor(this), null)).0;
@@ -3129,6 +3222,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             totalRetrievalAmount = totalRetrieval; // USDT
         };
     };
+
+    /// Returns the records being deposited.
     public query func get_depositing_all(_token: {#all; #eth; #token:EthAddress}, _account: ?Account): async 
     [(depositingBalance: Wei, txIndex: ?TxIndex, tx: ?Minter.TxStatus)]{
         var _tokenId: ?EthAddress = null; 
@@ -3166,9 +3261,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return res;
     };
+
+    /// Returns the transactions that the original token is being deposited into Minter. (For method-2).
     public query func get_mode2_pending_deposit_txn(_txHash: TxHash) : async ?Minter.PendingDepositTxn{
         return _getPendingDepositTxn(_toLower(_txHash));
     };
+
+    /// Returns all transactions that original tokens are being deposited into Minter. (For method-2).
     public query func get_mode2_pending_all(_token: {#all; #eth; #token:EthAddress}, _account: ?Account) : async 
     [(txn: Minter.DepositTxn, updatedTs: Timestamp, verified: Bool)]{
         var _tokenId: ?EthAddress = null; 
@@ -3191,21 +3290,31 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return res;
     };
+
+    /// Returns the transactions status for depositting. (For method-2).
     public query func get_mode2_deposit_txn(_txHash: TxHash) : async ?(DepositTxn, Timestamp){
         return _getDepositTxn(_toLower(_txHash));
     };
+
+    /// Returns pool balance of icETHMinter.
     public query func get_pool_balance(_token: ?EthAddress): async Wei{
         let tokenId = _toLower(Option.get(_token, eth_));
         let accountId = _accountId(Principal.fromActor(this), null);
         return _getBalance({owner = Principal.fromActor(this); subaccount = null }, tokenId);
     };
+
+    /// Returns fee balance of icETHMinter.
     public query func get_fee_balance(_token: ?EthAddress): async Wei{
         let tokenId = _toLower(Option.get(_token, eth_));
         return _getFeeBalance(tokenId);
     };
+
+    /// Returns the status of a transaction submitted by coordinating chain smart contract to external chain.
     public query func get_tx(_txi: TxIndex) : async ?Minter.TxStatus{
         return _getTx(_txi);
     }; 
+
+    /// Returns the status of the retrieval operation.
     public query func get_retrieval(_txi: TxIndex) : async ?Minter.RetrieveStatus{  
         switch(Trie.get(retrievals, keyn(_txi), Nat.equal)){
             case(?(status)){
@@ -3216,6 +3325,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
+
+    /// Returns retrieval log list.
     public query func get_retrieval_list(_account: Account) : async [Minter.RetrieveStatus]{  //latest 1000 records
         let accountId = _accountId(_account.owner, _account.subaccount);
         switch(Trie.get(withdrawals, keyb(accountId), Blob.equal)){
@@ -3233,6 +3344,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
+
+    /// Returns retrieving status list.
     public query func get_retrieving_all(_token: {#all; #eth; #token:EthAddress}, _account: ?Account) : async [(TxIndex, Minter.TxStatus, Timestamp)]{
         var tokenId = eth_; 
         switch(_token){
@@ -3253,26 +3366,40 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         }));
     };
+
+    /// Returns infomation for wrapped tokens.
     public query func get_ck_tokens() : async [(EthAddress, TokenInfo)]{
         return Iter.toArray(Trie.iter(tokens));
     };
+
+    /// Returns event log.
     public query func get_event(_blockIndex: BlockHeight) : async ?(Event, Timestamp){
         return ICEvents.getEvent(blockEvents, _blockIndex);
     };
+
+    /// Returns the first index of events that exists in the canister.
     public query func get_event_first_index() : async BlockHeight{
         return firstBlockIndex;
     };
+
+    /// Returns event log list.
     public query func get_events(_page: ?ListPage, _size: ?ListSize) : async TrieList<BlockHeight, (Event, Timestamp)>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
         return ICEvents.trieItems2<(Event, Timestamp)>(blockEvents, firstBlockIndex, blockIndex, page, size);
     };
+
+    /// Returns event logs for the specified account.
     public query func get_account_events(_accountId: AccountId) : async [(Event, Timestamp)]{ //latest 1000 records
         return ICEvents.getAccountEvents<Event>(blockEvents, accountEvents, _accountId);
     };
+
+    /// Returns the number of specified account's events.
     public query func get_event_count() : async Nat{
         return blockIndex;
     };
+
+    /// Returns the log list of access to the RPC
     public query func get_rpc_logs(_page: ?ListPage, _size: ?ListSize) : async TrieList<RpcId, RpcLog>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
@@ -3282,6 +3409,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         });
         return {data = data; total = res.total; totalPage = res.totalPage; };
     };
+
+    /// Returns the log of access to the RPC
     public query func get_rpc_log(_rpcId: RpcId) : async ?RpcLog{
         switch(Trie.get(ck_rpcLogs, keyn(_rpcId), Nat.equal)){
             case(?(item)){
@@ -3293,14 +3422,20 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
 
     };
+
+    /// Returns request list for RPC access.
     public query func get_rpc_requests(_page: ?ListPage, _size: ?ListSize) : async TrieList<RpcRequestId, RpcRequestConsensus>{
         let page = Option.get(_page, 1);
         let size = Option.get(_size, 100);
         return ICEvents.trieItems2<RpcRequestConsensus>(ck_rpcRequests, firstRpcRequestId, rpcRequestId, page, size);
     };
+
+    /// Returns a request for RPC access. (One RPC request calling multiple RPC accesses and form consensus)
     public query func get_rpc_request(_rpcRequestId: RpcRequestId) : async ?RpcRequestConsensus{
         return Trie.get(ck_rpcRequests, keyn(_rpcRequestId), Nat.equal);
     };
+
+    /// Returns the RPC request in the process of forming a consensus.
     public query func get_rpc_request_temps(): async [(RpcRequestId, (confirmationStats: [([Value], Nat)], ts: Timestamp))]{
         return Trie.toArray<RpcRequestId, ([([Value], Nat)], Timestamp), (RpcRequestId, ([([Value], Nat)], Timestamp))>(ck_rpcRequestConsensusTemps, 
             func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): (RpcRequestId, ([([Value], Nat)], Timestamp)){
@@ -3311,7 +3446,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     /* ===========================
       Keeper section
     ============================== */
-    // variant{put = record{"RPC1"; "..."; variant{Available}}}, null
+
+    /// Keeper updates the RPC URL.
     public shared(msg) func keeper_set_rpc(_act: {#remove; #put:(name: Text, url: Text, status: {#Available; #Unavailable})}, _sa: ?Sa) : async Bool{ 
         let accountId = _accountId(msg.caller, _sa);
         if (not(_onlyKeeper(accountId))){
@@ -3357,6 +3493,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return true;
     };
+
+    /// Returns list of keepers
     public query func get_keepers(): async TrieList<AccountId, Keeper>{
         let _res = trieItems<AccountId, Keeper>(ck_keepers, 1, 2000);
     };
@@ -3383,6 +3521,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
 
     /* ===========================
       KYT section
+      Instead of using blacklists, whitelists, and auditing mechanisms, a method of providing on-chain data transparency 
+      was used to deal with money laundering.
     ============================== */
     private let chainName = ckNetworkName;
     private func _putAddressAccount(_tokenId: KYT.Address, _address: KYT.Address, _account: KYT.Account) : (){
@@ -3413,12 +3553,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return KYT.getTxAccount(kyt_txAccounts, _toLower(_txHash));
     };
 
+    /// Query the address of the external chain by the IC's account-id.
     public query func get_cached_address(_accountId : KYT.AccountId) : async ?[KYT.ChainAccount]{
         return _getAccountAddress(_accountId);
     };
+
+    /// Query the IC's account-id by the address of the external chain.
     public query func get_cached_account(_address : KYT.Address) : async ?[KYT.ICAccount]{
         return _getAddressAccount(_address);
     };
+
+    /// Query the IC's account-id by the txid of the external chain.
     public query func get_cached_tx_account(_txHash: KYT.TxHash) : async ?[(KYT.ChainAccount, KYT.ICAccount)]{
         return _getTxAccount(_txHash);
     };
@@ -3426,15 +3571,21 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     /* ===========================
       Management section
     ============================== */
+
+    /// Returns owner of the canister.
     public query func getOwner() : async Principal{  
         return owner;
     };
+
+    /// Change owner.
     public shared(msg) func changeOwner(_newOwner: Principal) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         owner := _newOwner;
         ignore _putEvent(#changeOwner({newOwner = _newOwner}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Pause (true) or start (false) the canister.
     public shared(msg) func setPause(_paused: Bool) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         paused := _paused;
@@ -3445,18 +3596,24 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return true;
     };
+
+    /// Sets the minimum number of confirmations of the external chain.
     public shared(msg) func setMinConfirmations(_minConfirmations: Nat) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         minConfirmations := Nat.max(_minConfirmations, 5);
         ignore _putEvent(#config({setting = #minConfirmations(_minConfirmations)}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Sets the minimum number of confirmations required to get data from the RPC.
     public shared(msg) func setMinRpcConfirmations(_minConfirmations: Nat) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         minRpcConfirmations := Nat.max(_minConfirmations, 1);
         ignore _putEvent(#config({setting = #minRpcConfirmations(_minConfirmations)}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Sets the deposit method when Minting.
     public shared(msg) func setDepositMethod(_depositMethod: Nat8) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         depositMethod := _depositMethod;
@@ -3464,16 +3621,20 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return true;
     };
 
+    /// Adds RPC domain to the whitelist.
     public shared(msg) func addRpcWhitelist(_rpcDomain: Text) : async (){
         assert(_onlyOwner(msg.caller));
         _addRpcDomainWhitelist(_rpcDomain);
     };
+
+    /// Removes RPC domain from the whitelist.
     public shared(msg) func removeRpcWhitelist(_rpcDomain: Text) : async (){
         assert(_onlyOwner(msg.caller));
         _removeRpcDomainWhitelist(_rpcDomain);
         _removeProviders(_rpcDomain);
     };
-    // record{owner=principal ""; subaccount=null}, opt "Keeper1", null, variant{Normal}
+
+    /// Add a Keeper.
     public shared(msg) func setKeeper(_account: Account, _name: ?Text, _url: ?Text, _status: {#Normal; #Disabled}) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -3500,6 +3661,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ignore _putEvent(#config({setting = #setKeeper({account=_account; name=Option.get(_name, ""); url=Option.get(_url, ""); status=_status})}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Allocate rewards from the FEE balance.
     public shared(msg) func allocateRewards(_args: [{_account: Account; _value: Wei; _sendRetainedBalance: Bool}]) : async [(Account, Bool)]{ 
         assert(_onlyOwner(msg.caller));
         var res: [(Account, Bool)] = [];
@@ -3532,6 +3695,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return res;
     };
+
+    /// Updates an RPC URL
     public shared(msg) func updateRpc(_account: Account, _act: {#remove; #set: {#Available; #Unavailable}}) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         let accountId = _accountId(_account.owner, _account.subaccount);
@@ -3561,6 +3726,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ignore _putEvent(#config({setting = #updateRpc({keeper=_account; operation=_act })}), ?_accountId(owner, null));
         return true;
     };
+
+    /// Synchronise the basic information of the external chain.
     public shared(msg) func sync() : async (Nat, Nat, Nat, Text, Nat){
         assert(_onlyOwner(msg.caller));
         ck_chainId := await* _fetchChainId();
@@ -3569,6 +3736,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let selfAddressInfo = await* _getEthAddress(_accountId(Principal.fromActor(this), null), true);
         return (ck_chainId, ck_gasPrice, ck_ethBlockNumber.0, selfAddressInfo.0, selfAddressInfo.1);
     };
+
+    /// Confirms a retrieval transaction, calling it when the transaction has been confirmed but the status has not 
+    /// been updated in ethMinter canister.
     public shared(msg) func confirmRetrievalTx(_txIndex: TxIndex): async Bool{
         assert(_onlyOwner(msg.caller));
         switch(Trie.get(transactions, keyn(_txIndex), Nat.equal)){
@@ -3603,10 +3773,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
+
+    /// Rebuilds a transaction (Create a new ICTC transaction order).   
+    /// WARNING: (1) Ensure that previous transactions have failed before rebuilding the transaction. (2) If you want to reset 
+    /// the nonce, you need to make sure that the original nonce is used by another transaction, such as a blank transaction.
     public shared(msg) func rebuildAndResend(_txi: TxIndex, _nonce: {#Remain; #Reset: {spentTxHash: TxHash}}, _refetchGasPrice: Bool, _amountSub: Wei, _autoAdjust: Bool) : async ?BlockHeight{
-        // WARNING: Ensure that previous transactions have failed before rebuilding the transaction.
-        // WARNING: If you want to reset the nonce, you need to make sure that the original nonce is used by another transaction, such as a blank transaction.
-        // Create a new ICTC transaction order (new toid).
         assert(_onlyOwner(msg.caller));
         var _resetNonce : Bool = false;
         switch(_nonce){
@@ -3629,8 +3800,9 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         await* _syncTxStatus(_txi, true);
         return await* _coverTx(_txi, _resetNonce, ?_refetchGasPrice, _amountSub, _autoAdjust, not(_resetNonce));
     };
+
+    /// Rebuilds the transaction on the original task (Add compensation tasks to the original ICTC transaction order).
     public shared(msg) func rebuildAndContinue(_txi: TxIndex, _toid: SagaTM.Toid, _nonce: {#Remain; #Reset: {spentTxHash: TxHash}}) : async ?BlockHeight{
-        // Add compensation tasks to the original ICTC transaction order (original toid).
         assert(_onlyOwner(msg.caller));
         var _resetNonce : Bool = false;
         switch(_nonce){
@@ -3710,8 +3882,10 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             case(_){ throw Error.reject("402: The transaction record does not exist!"); };
         };
     };
+
+    /// Resets the nonce of the transaction.  
+    /// WARNING: Don't reset nonce when the system is sending transactions normally.
     public shared(msg) func resetNonce(_arg: {#latest; #pending}) : async Nonce{
-        // WARNING: Don't reset nonce when the system is sending transactions normally.
         assert(_onlyOwner(msg.caller));
         assert(not(_notPaused()));
         let mainAccountId = _accountId(Principal.fromActor(this), null);
@@ -3720,6 +3894,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _setEthAccount(mainAccountId, mainAddress, nonce);
         return nonce;
     };
+
+    /// Sends an empty transaction in order to fill a nonce value.
     public shared(msg) func sendBlankTx(_nonce: Nat) : async SagaTM.Toid{
         assert(_onlyOwner(msg.caller));
         let mainAccountId = _accountId(Principal.fromActor(this), null);
@@ -3764,9 +3940,13 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         await* _ictcSagaRun(toid, false);
         return toid;
     };
+
+    /// Updates the balances of ethMinter.  
+    /// Warning: (1) To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of 
+    /// block confirmations before calling this function after suspending the contract operation. (2) If you want to attribute 
+    /// the surplus tokens to the FEE balance, you need to make sure all claim operations for the cross-chain transactions have 
+    /// been completed.
     public shared(msg) func updateMinterBalance(_token: ?EthAddress, _surplusToFee: Bool) : async {pre: Minter.BalanceStats; post: Minter.BalanceStats; shortfall: Wei}{
-        // Warning: To ensure the accuracy of the balance update, it is necessary to wait for the minimum required number of block confirmations before calling this function after suspending the contract operation.
-        // WARNING: If you want to attribute the surplus tokens to the FEE balance, you need to make sure all claim operations for the cross-chain transactions have been completed.
         assert(_onlyOwner(msg.caller));
         assert(not(_notPaused()));
         assert(_ictcAllDone());
@@ -3805,13 +3985,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return {pre = preBalances; post = postBalances; shortfall = shortfall};
     };
+
+    /// Sets the infomation of wrapped token.  
+    /// Warning: Directly modifying token information may introduce other exceptions.
     public shared(msg) func setTokenInfo(_token: ?EthAddress, _info: TokenInfo) : async (){
-        // Warning: Directly modifying token information may introduce other exceptions.
         assert(_onlyOwner(msg.caller));
         let tokenId = _toLower(Option.get(_token, eth_));
         tokens := Trie.put(tokens, keyt(tokenId), Text.equal, _info).0;
         ignore _putEvent(#config({setting = #setToken({token=tokenId; info=_info})}), ?_accountId(owner, null));
     };
+
+    /// Sets fee of wrapped token.  
     public shared(msg) func setTokenFees(_token: ?EthAddress, _args: {minAmount: Wei; fixedFee: Wei; gasLimit: Nat; ethRatio: ?Wei; totalSupply: ?Nat;}) : async Bool{
         assert(_onlyOwner(msg.caller));
         let tokenId = _toLower(Option.get(_token, eth_));
@@ -3842,6 +4026,15 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return false;
     };
+
+    /// Sets a corresponding trading pair on ICDex for the wrapped token.   
+    /// ETH & Quote tokens args: 
+    /// - quoteToken: EthAddress // Quote token contract address.
+    /// - dexPair: Principal // The canister-id of pair "NativeToken/QuoteToken".
+    /// Other tokens args: 
+    /// - tokenId: EthAddress // The token contract address.
+    /// - dexPair: Principal // The canister-id of pair "Token/QuoteToken".
+    // e.g. 
     // ETH & Quote token: variant{ETH=record{quoteToken="0xefa83712d45ee530ac215b96390a663c01f2fee0";dexPair=principal "tkrhr-gaaaa-aaaak-aeyaq-cai"}}
     // Other tokens: variant{ERC20=record{tokenId="0x9813ad2cacba44fc8b099275477c9bed56c539cd";dexPair=principal "twv5a-raaaa-aaaak-aeycq-cai"}}
     public shared(msg) func setTokenDexPair(_token: {#ETH: {quoteToken: EthAddress; dexPair: Principal}; #ERC20: {tokenId: EthAddress; dexPair: Principal}}) : async Bool{
@@ -3862,6 +4055,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         return false;
     };
+
+    /// Sets token wasm.
     public shared(msg) func setCkTokenWasm(_wasm: Blob, _version: Text) : async (){
         assert(_onlyOwner(msg.caller));
         assert(Option.isNull(Array.find(icrc1WasmHistory, func (t: ([Nat8], Text)): Bool{ _version == t.1 })));
@@ -3871,16 +4066,32 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         ignore _putEvent(#config({setting = #setTokenWasm({version=_version; size=_wasm.size()})}), ?_accountId(owner, null));
     };
+
+    /// Gets version of token wasm.
     public query func getCkTokenWasmVersion() : async (Text, Nat){ 
         let wasm = _getLatestIcrc1Wasm();
         return (wasm.1, wasm.0.size());
     };
+
+    /// Gets version history of token wasm.
     public query func getCkTokenWasmHistory(): async [(Text, Nat)]{
         return Array.map<([Nat8], Text), (Text, Nat)>(icrc1WasmHistory, func (t: ([Nat8], Text)): (Text, Nat){
             return (t.1, t.0.size());
         });
     };
-    //opt "0xefa83712d45ee530ac215b96390a663c01f2fee0", "USDT", record{totalSupply=null; minAmount=10000000000000000; ckTokenFee=100000000000; fixedFee=1000000000000000; gasLimit=61000; ethRatio=1000000000}
+
+    /// Creates wrapped token (icETH/icERC20).  
+    /// args:
+    /// - token: ?EthAddress // Smart contract address for EVM token, If it is a native token, such as ETH, fill in null and default to 0x0000000000000000000000000000000000000000.
+    /// - rename: ?Text // Rename the name of the token on the IC.
+    /// - args: 
+    ///     - totalSupply: ?Wei/*smallest_unit*/; // The total supply, default is null.
+    ///     - minAmount: Wei/*smallest_unit Token*/; // Minimum number of tokens for icETHMinter operations.
+    ///     - ckTokenFee: Wei/*smallest_unit Token*/; // The floating fee charged by icETHMinter changes dynamically due to the price (ethRatio) of the token.
+    ///     - fixedFee: Wei/*smallest_unit ETH*/; // Fixed fee charged by icETHMinter.
+    ///     - gasLimit: Nat; // The blockchain network's gas limit.
+    ///     - ethRatio: Wei/*1 Gwei ETH = ? smallest_unit Token */ // The ratio of token to native token (e.g. ETH) * 1000000000.
+    // e.g. opt "0xefa83712d45ee530ac215b96390a663c01f2fee0", "USDT", record{totalSupply=null; minAmount=10000000000000000; ckTokenFee=100000000000; fixedFee=1000000000000000; gasLimit=61000; ethRatio=1000000000}
     public shared(msg) func launchToken(_token: ?EthAddress, _rename: ?Text, _args: {
         totalSupply: ?Wei/*smallest_unit Token*/; 
         minAmount: Wei/*smallest_unit Token*/; 
@@ -3956,6 +4167,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, newCanister.canister_id);
         return newCanister.canister_id;
     };
+
+    /// Sets logo of token.
     public shared(msg) func setTokenLogo(_canisterId: Principal, _logo: Text): async Bool{
         assert(_onlyOwner(msg.caller));
         let token = actor(Principal.toText(_canisterId)) : actor{ 
@@ -3967,6 +4180,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         metadata := Tools.arrayAppend(metadata, [{ content = _logo; name = "logo" }]);
         return await token.ictokens_setMetadata(metadata);
     };
+
+    /// Upgrades token canister.
     public shared(msg) func upgradeToken(_canisterId: Principal, _version: Text): async (version: Text){
         assert(_onlyOwner(msg.caller));
         var wasm : [Nat8] = [];
@@ -4007,6 +4222,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         ignore _putEvent(#config({setting = #upgradeTokenWasm({symbol=symbol; icTokenCanisterId = _canisterId; version = version})}), ?_accountId(owner, null));
         return version;
     };
+
+    /// Removes item from token list
     public shared(msg) func removeToken(_token: ?EthAddress): async (){
         assert(_onlyOwner(msg.caller));
         let tokenId = _toLower(Option.get(_token, eth_));
@@ -4014,22 +4231,30 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         tokens := Trie.remove(tokens, keyt(tokenId), Text.equal).0;
         cyclesMonitor := CyclesMonitor.remove(cyclesMonitor, tokenInfo.ckLedgerId);
     };
+
+    /// Clears the event logs based on index height.
     public shared(msg) func clearEvents(_clearFrom: BlockHeight, _clearTo: BlockHeight): async (){
         assert(_onlyOwner(msg.caller));
         assert(_clearTo >= _clearFrom);
         blockEvents := ICEvents.clearEvents<Event>(blockEvents, _clearFrom, _clearTo);
         firstBlockIndex := _clearTo + 1;
     };
+
+    /// Clears RPC logs based on id range.
     public shared(msg) func clearRpcLogs(_idFrom: RpcId, _idTo: RpcId) : async (){
         assert(_onlyOwner(msg.caller));
         assert(_idTo >= _idFrom);
         _clearRpcLogs(_idFrom, _idTo);
     };
+
+    /// Clears RPC request logs based on id range.
     public shared(msg) func clearRpcRequests(_idFrom: RpcRequestId, _idTo: RpcRequestId) : async (){
         assert(_onlyOwner(msg.caller));
         assert(_idTo >= _idFrom);
         _clearRpcRequests(_idFrom, _idTo);
     };
+
+    /// Clears the deposit transaction logs when minting.
     public shared(msg) func clearDepositTxns() : async (){
         assert(_onlyOwner(msg.caller));
         depositTxns := Trie.filter<TxHashId, (tx: DepositTxn, updatedTime: Timestamp)>(depositTxns, func (k: TxHashId, v: (tx: DepositTxn, updatedTime: Timestamp)): Bool{
@@ -4039,6 +4264,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             _now() <= v.4 + VALID_BLOCKS_FOR_CLAIMING_TXN * ckNetworkBlockSlot + 7 * 24 * 3600
         });
     };
+
+    /// Clears the records of Minter contracts sending transactions on external chains via TSS technology.
     public shared(msg) func clearCkTransactions() : async (){
         assert(_onlyOwner(msg.caller));
         transactions := Trie.filter<TxIndex, (tx: Minter.TxStatus, updatedTime: Timestamp, coveredTime: ?Timestamp)>(transactions, 
@@ -4053,14 +4280,20 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
 
     // Cycles monitor
+
+    /// Put a canister-id into the monitor.
     public shared(msg) func monitor_put(_canisterId: Principal): async (){
         assert(_onlyOwner(msg.caller));
         cyclesMonitor := await* CyclesMonitor.put(cyclesMonitor, _canisterId);
     };
+
+    /// Remove a canister-id from the monitor.
     public shared(msg) func monitor_remove(_canisterId: Principal): async (){
         assert(_onlyOwner(msg.caller));
         cyclesMonitor := CyclesMonitor.remove(cyclesMonitor, _canisterId);
     };
+
+    /// Returns all canister-ids in the monitor.
     public query func monitor_canisters(): async [(Principal, Nat)]{
         return Iter.toArray(Trie.iter(cyclesMonitor));
     };
@@ -4165,7 +4398,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     public shared(msg) func debug_send_to(_principal: Principal, _from: EthAddress, _to: EthAddress, _amount: Wei): async TxIndex{
         assert(_onlyOwner(msg.caller));
-        // testMainnet := true;
         let accountId = _accountId(_principal, null);
         let gasFee = _getEthGas(eth_);
         let txi = _newTx(#Deposit, {owner = _principal; subaccount = null }, eth_, _from, _to, _amount, gasFee);
@@ -4191,7 +4423,6 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         saga.close(toid);
         _updateTxToids(txi, [toid]);
         await* _ictcSagaRun(toid, false);
-        // testMainnet := false;
         return txi;
     };
     public shared(msg) func debug_verify_sign(_signer: EthAddress, _account : Account, _txHash: TxHash, _signature: [Nat8]) : async (Text, {r: [Nat8]; s: [Nat8]; v: Nat64}, EthAddress){
@@ -4283,63 +4514,80 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     * (Optional) Implement the following interface, which allows you to browse transaction records and execute compensation transactions through a UI interface.
     * https://cmqwp-uiaaa-aaaaj-aihzq-cai.raw.ic0.app/
     */
-    // ICTC: management functions
+    // TO = Transaction Order, which contain one or more TTs.
+    // TT = Transaction Task.
     private stable var ictc_admins: [Principal] = [];
     private func _onlyIctcAdmin(_caller: Principal) : Bool { 
         return Option.isSome(Array.find(ictc_admins, func (t: Principal): Bool{ t == _caller }));
     }; 
     private func _onlyBlocking(_toid: Nat) : Bool{
-        /// Saga
+        // Saga
         switch(_getSaga().status(_toid)){
             case(?(status)){ return status == #Blocking }; //  or status == #Compensating
             case(_){ return false; };
         };
-        /// 2PC
-        // switch(_getTPC().status(_toid)){
-        //     case(?(status)){ return status == #Blocking };
-        //     case(_){ return false; };
-        // };
     };
+
+    /// Returns to ICTC administrators
     public query func ictc_getAdmins() : async [Principal]{
         return ictc_admins;
     };
+
+    /// Add an ICTC administrator.
     public shared(msg) func ictc_addAdmin(_admin: Principal) : async (){
         assert(_onlyOwner(msg.caller)); // or _onlyIctcAdmin(msg.caller)
         if (Option.isNull(Array.find(ictc_admins, func (t: Principal): Bool{ t == _admin }))){
             ictc_admins := Tools.arrayAppend(ictc_admins, [_admin]);
         };
     };
+
+    /// Remove an ICTC administrator.
     public shared(msg) func ictc_removeAdmin(_admin: Principal) : async (){
         assert(_onlyOwner(msg.caller)); // or _onlyIctcAdmin(msg.caller)
         ictc_admins := Array.filter(ictc_admins, func (t: Principal): Bool{ t != _admin });
     };
 
-    // SagaTM Scan
+    /// Returns ICTC TM type.
     public query func ictc_TM() : async Text{
         return "Saga";
     };
-    /// Saga
+
+    /// Returns ICTC TO number.
     public query func ictc_getTOCount() : async Nat{
         return _getSaga().count();
     };
+
+    /// Returns an ICTC TO.
     public query func ictc_getTO(_toid: SagaTM.Toid) : async ?SagaTM.Order<CustomCallType>{
         return _getSaga().getOrder(_toid);
     };
+
+    /// Returns ICTC TOs.
     public query func ictc_getTOs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Toid, SagaTM.Order<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getOrders(_page, _size);
     };
+
+    /// Returns an ICTC TO pool in process.
     public query func ictc_getTOPool() : async [(SagaTM.Toid, ?SagaTM.Order<CustomCallType>)]{
         return _getSaga().getAliveOrders();
     };
+
+    /// Returns an ICTC TT.
     public query func ictc_getTT(_ttid: SagaTM.Ttid) : async ?SagaTM.TaskEvent<CustomCallType>{
         return _getSaga().getActuator().getTaskEvent(_ttid);
     };
+
+    /// Returns ICTC TTs according to the specified TO.
     public query func ictc_getTTByTO(_toid: SagaTM.Toid) : async [SagaTM.TaskEvent<CustomCallType>]{
         return _getSaga().getTaskEvents(_toid);
     };
+
+    /// Returns ICTC TTs.
     public query func ictc_getTTs(_page: Nat, _size: Nat) : async {data: [(SagaTM.Ttid, SagaTM.TaskEvent<CustomCallType>)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getTaskEvents(_page, _size);
     };
+
+    /// Returns an ICTC TT pool in process.
     public query func ictc_getTTPool() : async [(SagaTM.Ttid, SagaTM.Task<CustomCallType>)]{
         let pool = _getSaga().getActuator().getTaskPool();
         let arr = Array.map<(SagaTM.Ttid, SagaTM.Task<CustomCallType>), (SagaTM.Ttid, SagaTM.Task<CustomCallType>)>(pool, 
@@ -4348,27 +4596,37 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         });
         return arr;
     };
+
+    /// Returns the TTs that were in error.
     public query func ictc_getTTErrors(_page: Nat, _size: Nat) : async {data: [(Nat, SagaTM.ErrorLog)]; totalPage: Nat; total: Nat}{
         return _getSaga().getActuator().getErrorLogs(_page, _size);
     };
+
+    /// Returns a callee's status.
     public query func ictc_getCalleeStatus(_callee: Principal) : async ?SagaTM.CalleeStatus{
         return _getSaga().getActuator().calleeStatus(_callee);
     };
-    /// Transaction Governance
+
+    /// Clears the ICTC logs.
     public shared(msg) func ictc_clearLog(_expiration: ?Int, _delForced: Bool) : async (){ // Warning: Execute this method with caution
         assert(_onlyOwner(msg.caller));
         _getSaga().clear(_expiration, _delForced);
     };
+
+    /// Clears TT pool in process.
     public shared(msg) func ictc_clearTTPool() : async (){ // Warning: Execute this method with caution
         assert(_onlyOwner(msg.caller));
         _getSaga().getActuator().clearTasks();
     };
+
+    /// Blocks a TO.
     public shared(msg) func ictc_blockTO(_toid: SagaTM.Toid) : async ?SagaTM.Toid{
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         assert(not(_onlyBlocking(_toid)));
         let saga = _getSaga();
         return saga.block(_toid);
     };
+
     // public shared(msg) func ictc_removeTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid) : async ?SagaTM.Ttid{ // Warning: Execute this method with caution
     //     assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
     //     assert(_onlyBlocking(_toid));
@@ -4378,6 +4636,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     //     saga.close(_toid);
     //     return ttid;
     // };
+
+    /// Appends a TT to blocking TO.
     public shared(msg) func ictc_appendTT(_businessId: ?Blob, _toid: SagaTM.Toid, _forTtid: ?SagaTM.Ttid, _callee: Principal, _callType: SagaTM.CallType<CustomCallType>, _preTtids: [SagaTM.Ttid]) : async SagaTM.Ttid{
         // Governance or manual compensation (operation allowed only when a transaction order is in blocking status).
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -4389,7 +4649,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let ttid = saga.appendComp(_toid, Option.get(_forTtid, 0), taskRequest, null);
         return ttid;
     };
-    /// Try the task again
+    
+    /// Try the TT again.
     public shared(msg) func ictc_redoTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid) : async ?SagaTM.Ttid{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -4398,7 +4659,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         await* _ictcSagaRun(_toid, true);
         return ttid;
     };
-    /// set status of pending task
+    
+    /// Skips a TT, and set status.
     public shared(msg) func ictc_doneTT(_toid: SagaTM.Toid, _ttid: SagaTM.Ttid, _toCallback: Bool) : async ?SagaTM.Ttid{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -4410,7 +4672,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             throw Error.reject("420: internal call error: "# Error.message(e)); 
         };
     };
-    /// set status of pending order
+    
+    /// Skips a TO, and set status.
     public shared(msg) func ictc_doneTO(_toid: SagaTM.Toid, _status: SagaTM.OrderStatus, _toCallback: Bool) : async Bool{
         // Warning: proceed with caution!
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -4423,7 +4686,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             throw Error.reject("420: internal call error: "# Error.message(e)); 
         };
     };
-    /// Complete blocking order
+
+    /// Complete a TO.
     public shared(msg) func ictc_completeTO(_toid: SagaTM.Toid, _status: SagaTM.OrderStatus) : async Bool{
         // After governance or manual compensations, this method needs to be called to complete the transaction order.
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
@@ -4438,27 +4702,24 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             throw Error.reject("430: ICTC error: "# Error.message(e)); 
         };
     };
+
+    /// Runs ICTC and updates the status of the specified TO.
     public shared(msg) func ictc_runTO(_toid: SagaTM.Toid) : async ?SagaTM.OrderStatus{
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller));
         let saga = _getSaga();
         saga.close(_toid);
         try{
-            // countAsyncMessage += 2;
             let r = await saga.run(_toid);
-            // countAsyncMessage -= Nat.min(2, countAsyncMessage);
             return r;
         }catch(e){
-            // countAsyncMessage -= Nat.min(2, countAsyncMessage);
             throw Error.reject("430: ICTC error: "# Error.message(e)); 
         };
     };
+
+    /// Runs ICTC.
     public shared(msg) func ictc_runTT() : async Bool{ 
         // There is no need to call it normally, but can be called if you want to execute tasks in time when a TO is in the Doing state.
         assert(_onlyOwner(msg.caller) or _onlyIctcAdmin(msg.caller) or _notPaused());
-        // if (not(_checkAsyncMessageLimit())){
-        //     throw Error.reject("405: IC network is busy, please try again later."); 
-        // };
-        // _sessionPush(msg.caller);
         let saga = _getSaga();
         if (_onlyOwner(msg.caller)){
             await* _ictcSagaRun(0, true);
@@ -4474,6 +4735,11 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     /* ===========================
       DRC207 section
     ============================== */
+    // Default blackhole canister: 7hdtw-jqaaa-aaaak-aaccq-cai
+    // ModuleHash(dfx: 0.8.4): 603692eda4a0c322caccaff93cf4a21dc44aebad6d71b40ecefebef89e55f3be
+    // Github: https://github.com/iclighthouse/ICMonitor/blob/main/Blackhole.mo
+
+    /// Returns the monitorability configuration of the canister.
     public query func drc207() : async DRC207.DRC207Support{
         return {
             monitorable_by_self = false;
@@ -4482,23 +4748,22 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             timer = { enable = false; interval_seconds = null; }; 
         };
     };
-    /// canister_status
-    // public shared(msg) func canister_status() : async DRC207.canister_status {
-    //     // _sessionPush(msg.caller);
-    //     // if (_tps(15, null).1 > setting.MAX_TPS*5 or _tps(15, ?msg.caller).0 > 2){ 
-    //     //     assert(false); 
-    //     // };
-    //     let ic : DRC207.IC = actor("aaaaa-aa");
-    //     await ic.canister_status({ canister_id = Principal.fromActor(this) });
-    // };
-    // receive cycles
+    
+    /// Receives cycles
     public func wallet_receive(): async (){
         let amout = Cycles.available();
         let _accepted = Cycles.accept<system>(amout);
     };
-    /// timer tick
-    // public shared(msg) func timer_tick(): async (){
-    //     //
+
+    // /// Withdraw cycles
+    // public shared(msg) func withdraw_cycles(_amount: Nat, _to: Principal) : async (){
+    //     assert(_onlyOwner(msg.caller));
+    //     type Wallet = actor{ wallet_receive : shared () -> async (); };
+    //     let wallet : Wallet = actor(Principal.toText(_to));
+    //     let amount = Cycles.balance();
+    //     assert(_amount + 20_000_000_000 < amount);
+    //     Cycles.add<system>(_amount);
+    //     await wallet.wallet_receive();
     // };
 
     private func timerLoop() : async (){
@@ -4545,6 +4810,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
     private var timerId: Nat = 0;
     private var timerId2: Nat = 0;
+
+    /// Start the Timer, it will be started automatically when upgrading the canister.
     public shared(msg) func timerStart(_intervalSeconds1: Nat, _intervalSeconds2: Nat): async (){
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);
@@ -4552,6 +4819,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         timerId := Timer.recurringTimer<system>(#seconds(_intervalSeconds1), timerLoop);
         timerId2 := Timer.recurringTimer<system>(#seconds(_intervalSeconds2), timerLoop2);
     };
+
+    /// Stop the Timer
     public shared(msg) func timerStop(): async (){
         assert(_onlyOwner(msg.caller));
         Timer.cancelTimer(timerId);

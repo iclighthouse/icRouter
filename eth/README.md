@@ -11,50 +11,88 @@ https://internetcomputer.org/ethereum-integration
 
 Note: icETH/icERC20 is a separate version implemented by the ICLighthouse team using the above technology.
 
+## Concepts
+
+### TSS and chain-key
+
+Threshold Signature Scheme (TSS) is a multi-signature scheme that does not require the exposure of private keys and is well 
+suited for 100% chain implementation of cross-chain transactions, which is also referred to as chain-key technology on IC.
+
+### External Chain and Coordinating chain
+
+External Chain is a blockchain that integrates with IC network, such as bitcoin network.  
+Coordinating chain is the blockchain where decentralised cross-chain smart contracts are located, in this case IC.
+
+### Original token and Wrapped token
+
+Original tokens are tokens issued on external chain, such as ETH.  
+Wrapped tokens are tokens that have been wrapped by a smart contract with a 1:1 correspondence and issued on IC, such as icETH.
+
+### Minting and Retrieval
+
+Minting is the process of locking the original tokens of external chain into the Minter contract of the coordinating chain 
+and issuing the corresponding wrapped tokens. Retrieval is burning the wrapped tokens and sending the corresponding original 
+tokens in the Minter contract to the holder.
+
 ## How it works
 
 The integration of ethereum on the IC network without bridges is achieved through chain-key (threshold signature) technology for ECDSA signatures, and the smart contracts of IC can directly access the RPC nodes of ethereum through HTTPS Outcall technology. This is the technical solution implemented in stage 1, which can be decentralized by configuring multiple RPC API providers. 
 
 The user sends an ethereum asset, ETH or ERC20 token, to an address controlled by the IC smart contract (Minter), which receives the ethereum asset and mint icETH or icERC20 token on the IC network at a 1:1 ratio. When users want to retrieve the real ethereum asset, they only need to return icETH or icERC20 token to Minter smart contract to retrieve the ethereum assets.
 
-icRouter's ethMinter Canister enables communication with the EVM blockchain network by calling the chain-key interface of the IC network, which has a dedicated subnet to provide block data and threshold ECDSA signatures, and to provide consensus.
+icRouter's ethMinter Canister enables communication with the external chain network by calling the chain-key interface of the IC network, which has a dedicated subnet to provide block data and threshold ECDSA signatures, and to provide consensus.
 
-### ETH/ERC20 -> icETH/icERC20 (Method 1)
+### Minting: ETH/ERC20 -> icETH/icERC20 (Method 1)
 
-Method 1 Cross-chaining native ETH/ERC20 to the IC network requires three steps:
-- (1) The user calls get_deposit_address() method of ethMinter to get the deposit address, which is different for each user. It has no plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
-- (2) The user sends ETH or ERC20 token in his/her wallet to the above deposit address.
-- (3) After waiting for transaction confirmation, the user calls update_balance() method of ethMinter to mint the corresponding icETH or icERC20 token in IC network. Native ETH/ERC20 tokens are controlled by the ethMinter canister, and the 1:1 corresponding icETH/icERC20 are ICRC1 tokens on the IC network.
+Method 1 Cross-chaining original tokens to the IC network requires three steps:
+- (1) The user calls get_deposit_address() method of ethMinter to get the deposit address of external chain, which is different 
+for each user. It has no plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
+- (2) The user sends original tokens in his/her wallet to the above deposit address.
+- (3) After waiting for external chain transaction confirmation, the user calls update_balance() method of ethMinter to mint the 
+corresponding wrapped tokens in IC network. Original tokens are controlled by the ethMinter canister, and the 1:1 corresponding 
+wrapped tokens are ICRC1 tokens on the IC network.
 
 ![ETH -> icETH](../images/eth1-1.png)
 
-### ETH/ERC20 -> icETH/icERC20 (Method 2)
+### Minting: ETH/ERC20 -> icETH/icERC20 (Method 2)
 
-Method 2 Cross-chaining native ETH/ERC20 to the IC network requires three steps:
-- (1) The user sends ETH/ERC20 tokens to the ethMinter pool address, which is controlled by the ethMinter but does not have a plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
-- (2) The user signs an EIP712 signature in his wallet, which includes the above icRouter label, txid, the user's principal in the IC.
-- (3) The user calls ethMinter's claim() method, providing the txid and signature. ethMinter mints the corresponding icETH/icERC20 tokens on IC after checking the parameters and blockchain data.
+Method 2 Cross-chaining original tokens to the IC network requires three steps:
+- (1) The user sends original tokens to the ethMinter pool address, which is controlled by the ethMinter but does not 
+have a plaintext private key and is decentrally controlled by a subnet of the IC using TSS technology.
+- (2) The user signs an EIP712 signature in his wallet, which includes the above icRouter label, txid, the user's principal 
+in IC.
+- (3) The user calls ethMinter's claim() method, providing the txid and signature. ethMinter mints the corresponding 
+wrapped tokens on IC after checking the parameters and blockchain data.
 
 ![ETH -> icETH](../images/eth1-2.png)
 
-### icETH/icERC20 -> ETH/ERC20
+### Retrieval: icETH/icERC20 -> ETH/ERC20
 
-Retrieving native ETH/ERC20 tokens from the IC network requires three steps.
-- (1) The user gets the withdrawal address of icETH/icERC20 (owner is ethMinter canister-id, subaccount is user account-id), or he can call ethMinter's get_withdrawal_account() method to get it (this is a query method, so you need to pay attention to its security).
-- (2) The user sends icETH/icERC20 tokens to the above withdrawal address and burns them.
-- (3) The user calls ethMinter's retrieve() method to provide his/her EVM blockchain address and retrieve the native ETH/ERC20 tokens. In this process, the ETH/ERC20 tokens that were originally stored in the ethMinter canister are sent to the destination address using the threshold signature technique.
+Retrieving original tokens from the IC network requires three steps.
+- (1) The user gets the withdrawal address of external chain (owner is ethMinter canister-id, subaccount is user 
+account-id), or he can call ethMinter's get_withdrawal_account() method to get it (this is a query method, so 
+needs to pay attention to its security).
+- (2) The user sends wrapped tokens to the above withdrawal address and burns them.
+- (3) The user calls ethMinter's retrieve() method to provide his/her address of external chain and retrieve the 
+original tokens. In this process, the original tokens that were stored in the ethMinter canister 
+are sent to the destination address using the threshold signature technique.
 
 ![icETH > ETH](../images/eth1-3.png)
 
 
 ### RPC Whitelist and Keepers
 
-ethMinter sets up RPC whitelists and Keepers through governance, where Keepers submit RPC URLs. ethMinter accesses data from multiple RPC endpoints through http_outcall and forms consensus.
+icETHMinter sets up RPC whitelists and Keepers through governance, where Keepers submit RPC URLs. icETHMinter accesses data from multiple RPC endpoints through http_outcall and forms consensus.
 
-RPC Whitelist: RPC domains that are allowed to be added to ethMinter, generally common RPC providers in the market.
+RPC Whitelist: RPC domains that are allowed to be added to icETHMinter, generally common RPC providers in the market.
 
-Keepers: users who are added to ethMinter by governance to provide RPC URLs, they need to select RPC providers in the RPC whitelist.
+Keepers: users who are added to icETHMinter by governance to provide RPC URLs, they need to select RPC providers in the RPC whitelist.
 
+## Naming rules for variables and interfaces.
+
+- By default, small camel nomenclature (e.g., lowerCamelCase) is used.
+- Snake nomenclature (e.g., snake_case) may be used to match external interface specifications, or if an external function module is referenced.
+- In the case of specific prefixes, the prefix ‘xxx_’ is added, either in the hump nomenclature or in the snake nomenclature.
 
 ## Dependent toolkits
 
@@ -84,7 +122,7 @@ dfx canister --network ic create icETHMinter --controller __your principal__
 dfx build --network ic icETHMinter
 ```
 - Code: "eth/src/icETHMinter.mo"
-- Module hash: 27ca90ada70110e84346e3bbc95d9c8b3218a1a0d1aa414e9a593267ed70c6f6
+- Module hash: e6e36e3b935bc80447a3147807bb8a6f672f00d684a0c14c000cf3d4ec460403
 - Version: 0.9.1
 - Build arg: {
     "args": "--compacting-gc",
@@ -99,15 +137,15 @@ dfx build --network ic icETHMinter
 dfx canister --network ic install icETHMinter --argument '("Sepolia", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true)'
 ```
 args:
-- initNetworkName: Text // Blockchain network name.
-- initSymbol: Text // Blockchain network native token symbol.
-- initDecimals: Nat8 // Blockchain network native tokens decimals.
-- initBlockSlot: Nat // Blockchain network block interval time in seconds.
+- initNetworkName: Text // External chain network name.
+- initSymbol: Text // Original token symbol.
+- initDecimals: Nat8 // Original token decimals.
+- initBlockSlot: Nat // External chain network block interval time in seconds.
 - initArgs:
-    - min_confirmations : ?Nat; // Minimum number of confirmed blocks in a blockchain network.
+    - min_confirmations : ?Nat; // Minimum number of confirmed blocks in external chain network.
     - rpc_confirmations: Nat; // The minimum number of confirmations required to call the RPC interface to form a consensus.
     - tx_type: {#EIP1559; #EIP2930; #Legacy}; // Transaction construction.
-    - deposit_method: Nat8; // Methods to cross-chain native tokens from EVM blockchain to IC network. 1 - method1 enabled; 2 - method2 enabled; 3 - method1 and method2 enabled.
+    - deposit_method: Nat8; // Methods to cross-chain original tokens from external chain to IC network. 1 - method1 enabled; 2 - method2 enabled; 3 - method1 and method2 enabled.
 - enDebug: Bool; // Whether to start debugging.
 
 ### 2. Set up RPC Whitelist and Keepers
@@ -124,7 +162,7 @@ dfx canister --network ic call icETHMinter setKeeper '(record{owner=principal "_
 ```
 Note: Keeper can call keeper_set_rpc() method to reset the RPC URL and query get_keepers() method to get the latest status.
 
-### 3. Set token wasm
+### 3. Set wrapped token wasm
 
 **call icETHMinter.setCkTokenWasm()**
 
@@ -159,7 +197,7 @@ arg: Nat // Timer interval (seconds).
 dfx canister --network ic call icETHMinter setPause '(false)'
 ```
 
-### 5. Launch icETH/icERC20
+### 5. Launch wrapped tokens
 
 **call icETHMinter.launchToken()**
 ```
@@ -176,7 +214,7 @@ args:
        - gasLimit: Nat; // The blockchain network's gas limit.
        - ethRatio: Wei/*1 Gwei ETH = ? smallest_unit Token */ // The ratio of token to native token (e.g. ETH) * 1000000000.
 
-### 6. Sets the token's canister-id of trading pair on ICDex.
+### 6. Sets canister-id of trading pair for a wrapped token.
 
 **Native & Quote token** (e.g. icETH & icUSDT)
 ```
@@ -184,7 +222,7 @@ dfx canister --network ic call icETHMinter setTokenDexPair '(variant{ETH = recor
 ```
 args: 
 - quoteToken: EthAddress // Quote token contract address.
-- dexPair: Principal // The canister-id of pair NativeToken/QuoteToken.
+- dexPair: Principal // The canister-id of pair "NativeToken/QuoteToken".
 
 **Other tokens**
 ```
@@ -192,7 +230,7 @@ dfx canister --network ic call icETHMinter setTokenDexPair '(variant{ ERC20 = re
 ```
 args: 
 - tokenId: EthAddress // The token contract address.
-- dexPair: Principal // The canister-id of pair Token/QuoteToken.
+- dexPair: Principal // The canister-id of pair "Token/QuoteToken".
 
 ## Related technologies used
 

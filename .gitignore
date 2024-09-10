@@ -2,5 +2,6 @@
 .idea
 .dfx
 .vessel
+.tmp
 *--*
 canister_ids.json
