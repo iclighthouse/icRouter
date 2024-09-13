@@ -112,6 +112,7 @@ args:
     - fixed_fee : Nat; // Fixed fee (satoshi) that will be charged for each operation (mint/retrieve).
     - dex_pair: ?Principal; // icBTC trading pair on ICDex (optional).
 - enDebug: Bool; // Whether to start debugging.
+
 Note: 
 - These parameters filled in will take effect each time you upgrade.
 - btcMinter calls bitcoin mainnet data.

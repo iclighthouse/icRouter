@@ -188,7 +188,7 @@ dfx canister --network ic call icETHMinter sync '()'
 
 **Start timer**
 ```
-dfx canister --network ic call icETHMinter timerStart '(86400)'
+dfx canister --network ic call icETHMinter timerStart '(1800, 180)'
 ```
 arg: Nat // Timer interval (seconds).
 
