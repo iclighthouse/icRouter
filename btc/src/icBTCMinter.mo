@@ -173,7 +173,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let GET_CURRENT_FEE_PERCENTILES_COST_CYCLES : Cycles = 100_000_000;
     let SEND_TRANSACTION_BASE_COST_CYCLES : Cycles = 5_000_000_000;
     let SEND_TRANSACTION_COST_CYCLES_PER_BYTE : Cycles = 20_000_000;
-    let ECDSA_SIGN_CYCLES : Cycles = 22_000_000_000;
+    let ECDSA_SIGN_CYCLES : Cycles = 30_000_000_000;
     let ICTC_RUN_INTERVAL : Nat = 10;
     let MIN_VISIT_INTERVAL : Nat = 30; //seconds
     let AVG_TX_BYTES : Nat64 = 450; /*config*/
@@ -181,7 +181,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.2"; /*config*/
+    private let version_: Text = "0.3.3"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private stable var pause: Bool = false;
