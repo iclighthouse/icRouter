@@ -3674,23 +3674,24 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     /// - Ankr
     public shared(msg) func setDefaultKeepers(_providers: [Text]) : async (){
         assert(_onlyOwner(msg.caller));
-        for (providerName in _providers.vals()){
-            if (providerName == "Alchemy" or (_providers.size() == 1 and _providers[0] == "All")){
+        var providers = _providers;
+        if (_providers.size() == 1 and _providers[0] == "All"){
+            providers := ["Alchemy", "BlockPi", "PublicNode", "Ankr"];
+        };
+        for (providerName in providers.vals()){
+            if (providerName == "Alchemy"){
                 let account = {owner = Principal.fromActor(this); subaccount = ?[1: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_Alchemy", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_Alchemy", "#Alchemy", #Available);
-            };
-            if (providerName == "BlockPi" or (_providers.size() == 1 and _providers[0] == "All")){
+            }else if (providerName == "BlockPi"){
                 let account = {owner = Principal.fromActor(this); subaccount = ?[2: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_BlockPi", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_BlockPi", "#BlockPi", #Available);
-            };
-            if (providerName == "PublicNode" or (_providers.size() == 1 and _providers[0] == "All")){
+            }else if (providerName == "PublicNode"){
                 let account = {owner = Principal.fromActor(this); subaccount = ?[3: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_PublicNode", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_PublicNode", "#PublicNode", #Available);
-            };
-            if (providerName == "Ankr" or (_providers.size() == 1 and _providers[0] == "All")){
+            }else if (providerName == "Ankr"){
                 let account = {owner = Principal.fromActor(this); subaccount = ?[4: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_Ankr", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_Ankr", "#Ankr", #Available);
