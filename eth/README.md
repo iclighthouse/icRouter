@@ -149,7 +149,10 @@ args:
 - enDebug: Bool; // Whether to start debugging.
 
 ### 2. Set up RPC Whitelist and Keepers
-
+```
+dfx canister --network ic call icETHMinter setDefaultKeepers '(vec{ "All" })'
+```
+Or add custom RPC providers.
 ```
 dfx canister --network ic call icETHMinter addRpcWhitelist '("eth-sepolia.g.alchemy.com")'
 dfx canister --network ic call icETHMinter addRpcWhitelist '("rpc.ankr.com")'
