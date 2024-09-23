@@ -122,8 +122,8 @@ dfx canister --network ic create icETHMinter --controller __your principal__
 dfx build --network ic icETHMinter
 ```
 - Code: "eth/src/icETHMinter.mo"
-- Module hash: e6e36e3b935bc80447a3147807bb8a6f672f00d684a0c14c000cf3d4ec460403
-- Version: 0.9.1
+- Module hash: 85a108783e39bab4cde92758a71d3be36b33fb7f416d999f35e713e2ac3b42b6
+- Version: 0.9.2
 - Build arg: {
     "args": "--compacting-gc",
     "gzip" : true
@@ -149,6 +149,7 @@ args:
 - enDebug: Bool; // Whether to start debugging.
 
 ### 2. Set up RPC Whitelist and Keepers
+Add default providers Alchemy, BlockPi, PublicNode, Ankr via EVM RPC Canister (https://github.com/internet-computer-protocol/evm-rpc-canister).
 ```
 dfx canister --network ic call icETHMinter setDefaultKeepers '(vec{ "All" })'
 ```

@@ -215,7 +215,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
 
     let KEY_NAME : Text = "key_1";
     let ECDSA_SIGN_CYCLES : Cycles = 30_000_000_000;
-    let RPC_AGENT_CYCLES : Cycles = 300_000_000;
+    let RPC_AGENT_CYCLES : Cycles = 800_000_000;
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     let ICTC_RUN_INTERVAL : Nat = 10;
     let MIN_VISIT_INTERVAL : Nat = 6; //seconds
@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.1"; /*config*/
+    private let version_: Text = "0.9.2"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -3535,7 +3535,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             data = Array.map<(AccountId, RpcProvider), (AccountId, RpcProvider)>(res.data, func (t:(AccountId, RpcProvider)): (AccountId, RpcProvider){
                 (t.0, {
                     name = t.1.name; 
-                    url = _getRpcDomain(t.1.url) # "***" # ETHCrypto.strRight(t.1.url, 4); 
+                    url = (if (t.1.url.size() < 16){ t.1.url } else { _getRpcDomain(t.1.url) # "***" # ETHCrypto.strRight(t.1.url, 4) }); 
                     keeper = t.1.keeper; 
                     status = t.1.status; 
                     calls = t.1.calls; 
