@@ -395,6 +395,19 @@ func removeRpcWhitelist(_rpcDomain : Text) : async ()
 
 Removes RPC domain from the whitelist.
 
+## Function `setDefaultKeepers`
+``` motoko no-repl
+func setDefaultKeepers(_providers : [Text]) : async ()
+```
+
+Set default keepers (Gets data from EVM RPC canister deployed by Dfinity).  
+Providers
+- All (Alchemy, BlockPi, PublicNode, Ankr)
+- Alchemy
+- BlockPi
+- PublicNode
+- Ankr
+
 ## Function `setKeeper`
 ``` motoko no-repl
 func setKeeper(_account : Account, _name : ?Text, _url : ?Text, _status : {#Normal; #Disabled}) : async Bool
@@ -616,12 +629,24 @@ func monitor_canisters() : async [(Principal, Nat)]
 
 Returns all canister-ids in the monitor.
 
+## Function `debug_evm_rpc_call`
+``` motoko no-repl
+func debug_evm_rpc_call(_providerName : Text, _input : Text) : async Text
+```
+
+Debug *
+
+## Function `debug_evm_rpc_call_cost`
+``` motoko no-repl
+func debug_evm_rpc_call_cost(_providerName : Text, _input : Text) : async Nat
+```
+
+
 ## Function `debug_get_rpc`
 ``` motoko no-repl
 func debug_get_rpc(_offset : Nat) : async (keeper : AccountId, rpcUrl : Text, size : Nat)
 ```
 
-Debug *
 
 ## Function `debug_outcall`
 ``` motoko no-repl

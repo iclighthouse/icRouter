@@ -149,7 +149,7 @@ import Backup "lib/BackupTypes";
 /// ## API
 ///
 
-// e.g. ("Ethereum/Sepolia", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true)
+// e.g. ("Ethereum/Sepolia/(Base/Optimism/Arbitrum)", "ETH", 18, 12, record{min_confirmations=opt 96; rpc_confirmations = 3; tx_type = opt variant{EIP1559}; deposit_method=3}, true)
 shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Text, initDecimals: Nat8, initBlockSlot: Nat, initArgs: Minter.InitArgs, enDebug: Bool) = this {
     assert(Option.get(initArgs.min_confirmations, 0) >= 64); /*config*/
 
@@ -214,8 +214,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
 
     let KEY_NAME : Text = "key_1";
-    let ECDSA_SIGN_CYCLES : Cycles = 22_000_000_000;
-    let RPC_AGENT_CYCLES : Cycles = 200_000_000;
+    let ECDSA_SIGN_CYCLES : Cycles = 30_000_000_000;
+    let RPC_AGENT_CYCLES : Cycles = 800_000_000;
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     let ICTC_RUN_INTERVAL : Nat = 10;
     let MIN_VISIT_INTERVAL : Nat = 6; //seconds
@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.1"; /*config*/
+    private let version_: Text = "0.9.2"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -1769,7 +1769,61 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return await* ETHCrypto.signMsg(_dpath, _messageHash, ECDSA_SIGN_CYCLES, KEY_NAME);
     };
 
-
+    private func _putKeeper(_account: Account, _name: ?Text, _url: ?Text, _status: {#Normal; #Disabled}) : (){
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        switch(Trie.get(ck_keepers, keyb(accountId), Blob.equal)){
+            case(?(keeper)){
+                ck_keepers := Trie.put(ck_keepers, keyb(accountId), Blob.equal, {
+                    name = Option.get(_name, keeper.name); 
+                    url = Option.get(_url, keeper.url); 
+                    account = _account;
+                    status = _status;
+                    balance = keeper.balance;
+                }).0;
+            };
+            case(_){
+                ck_keepers := Trie.put(ck_keepers, keyb(accountId), Blob.equal, {
+                    name = Option.get(_name, ""); 
+                    url = Option.get(_url, ""); 
+                    account = _account;
+                    status = _status;
+                    balance = 0;
+                }).0;
+            };
+        };
+        ignore _putEvent(#config({setting = #setKeeper({account=_account; name=Option.get(_name, ""); url=Option.get(_url, ""); status=_status})}), null);
+    };
+    private func _putKeeperRpc(_account: Account, _name: Text, _url: Text, _status: {#Available; #Unavailable}): (){
+        let accountId = _accountId(_account.owner, _account.subaccount);
+        switch(Trie.get(ck_rpcProviders, keyb(accountId), Blob.equal)){
+            case(?(provider)){
+                ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
+                    name = _name; 
+                    url = _url; 
+                    keeper = accountId;
+                    status = _status; 
+                    calls = provider.calls; 
+                    errors = provider.errors; 
+                    preHealthCheck = provider.preHealthCheck;
+                    healthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
+                    latestCall = provider.latestCall;
+                }).0;
+            };
+            case(_){
+                ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
+                    name = _name; 
+                    url = _url; 
+                    keeper = accountId;
+                    status = _status; 
+                    calls = 0; 
+                    errors = 0; 
+                    preHealthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
+                    healthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
+                    latestCall = 0;
+                }).0;
+            };
+        };
+    };
     private func _isNormalRpcReturn(_msg: Text) : Bool{
         return Text.contains(_msg, #text "no consensus was reached") or Text.contains(_msg, #text "No consensus could be reached") 
         or Text.contains(_msg, #text "already known") or Text.contains(_msg, #text "ALREADY_EXISTS");
@@ -1782,10 +1836,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let input = "{\"jsonrpc\":\"2.0\",\"method\":\""# _methodName #"\",\"params\": "# _params #",\"id\":"# Nat.toText(id) #"}";
         rpcId += 1;
         ck_rpcLogs := RpcRequest.preRpcLog(ck_rpcLogs, id, _rpcUrl, input);
-        Cycles.add<system>(RPC_AGENT_CYCLES);
         try{
-            let res = await* RpcCaller.call(_rpcUrl, input, _responseSize, RPC_AGENT_CYCLES, ?{function = rpc_call_transform; context = Blob.fromArray([])});
-            return (id, #Ok(res.2));
+            if (Text.startsWith(_rpcUrl, #char '#')){ // Access via EVM RPC canister
+                let res = await* RpcCaller.evmRpcRequest(ckNetworkName, _rpcUrl, input, _responseSize, RPC_AGENT_CYCLES);
+                return (id, #Ok(res)); // Contains the error message returned by the RPC.
+            }else{
+                let res = await* RpcCaller.call(_rpcUrl, input, _responseSize, RPC_AGENT_CYCLES, ?{function = rpc_call_transform; context = Blob.fromArray([])});
+                return (id, #Ok(res.2)); // Contains the error message returned by the RPC.
+            };
         }catch(e){
             return (id, #Err(Error.message(e)));
         };
@@ -3461,34 +3519,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
                 if (not(_isRpcDomainWhitelist(url))){
                     throw Error.reject("500: The RPC domain is not whitelisted.");
                 };
-                switch(Trie.get(ck_rpcProviders, keyb(accountId), Blob.equal)){
-                    case(?(provider)){
-                        ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
-                            name = name; 
-                            url = url; 
-                            keeper = accountId;
-                            status = status; 
-                            calls = provider.calls; 
-                            errors = provider.errors; 
-                            preHealthCheck = provider.preHealthCheck;
-                            healthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
-                            latestCall = provider.latestCall;
-                        }).0;
-                    };
-                    case(_){
-                        ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
-                            name = name; 
-                            url = url; 
-                            keeper = accountId;
-                            status = status; 
-                            calls = 0; 
-                            errors = 0; 
-                            preHealthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
-                            healthCheck = {time=0; calls=0; errors=0; recentPersistentErrors=?0};
-                            latestCall = 0;
-                        }).0;
-                    };
-                };
+                _putKeeperRpc({owner = msg.caller; subaccount = _sa}, name, url, status);
             };
         };
         return true;
@@ -3504,7 +3535,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             data = Array.map<(AccountId, RpcProvider), (AccountId, RpcProvider)>(res.data, func (t:(AccountId, RpcProvider)): (AccountId, RpcProvider){
                 (t.0, {
                     name = t.1.name; 
-                    url = _getRpcDomain(t.1.url) # "***" # ETHCrypto.strRight(t.1.url, 4); 
+                    url = (if (t.1.url.size() < 16){ t.1.url } else { _getRpcDomain(t.1.url) # "***" # ETHCrypto.strRight(t.1.url, 4) }); 
                     keeper = t.1.keeper; 
                     status = t.1.status; 
                     calls = t.1.calls; 
@@ -3634,31 +3665,44 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         _removeProviders(_rpcDomain);
     };
 
+    /// Set default keepers (Gets data from EVM RPC canister deployed by Dfinity).  
+    /// Providers
+    /// - All (Alchemy, BlockPi, PublicNode, Ankr)
+    /// - Alchemy
+    /// - BlockPi
+    /// - PublicNode
+    /// - Ankr
+    public shared(msg) func setDefaultKeepers(_providers: [Text]) : async (){
+        assert(_onlyOwner(msg.caller));
+        var providers = _providers;
+        if (_providers.size() == 1 and _providers[0] == "All"){
+            providers := ["Alchemy", "BlockPi", "PublicNode", "Ankr"];
+        };
+        for (providerName in providers.vals()){
+            if (providerName == "Alchemy"){
+                let account = {owner = Principal.fromActor(this); subaccount = ?[1: Nat8]};
+                _putKeeper(account, ?"Dfinity:EVM_RPC_Alchemy", null, #Normal);
+                _putKeeperRpc(account, "EVM_RPC_Alchemy", "#Alchemy", #Available);
+            }else if (providerName == "BlockPi"){
+                let account = {owner = Principal.fromActor(this); subaccount = ?[2: Nat8]};
+                _putKeeper(account, ?"Dfinity:EVM_RPC_BlockPi", null, #Normal);
+                _putKeeperRpc(account, "EVM_RPC_BlockPi", "#BlockPi", #Available);
+            }else if (providerName == "PublicNode"){
+                let account = {owner = Principal.fromActor(this); subaccount = ?[3: Nat8]};
+                _putKeeper(account, ?"Dfinity:EVM_RPC_PublicNode", null, #Normal);
+                _putKeeperRpc(account, "EVM_RPC_PublicNode", "#PublicNode", #Available);
+            }else if (providerName == "Ankr"){
+                let account = {owner = Principal.fromActor(this); subaccount = ?[4: Nat8]};
+                _putKeeper(account, ?"Dfinity:EVM_RPC_Ankr", null, #Normal);
+                _putKeeperRpc(account, "EVM_RPC_Ankr", "#Ankr", #Available);
+            };
+        };
+    };
+
     /// Add a Keeper.
     public shared(msg) func setKeeper(_account: Account, _name: ?Text, _url: ?Text, _status: {#Normal; #Disabled}) : async Bool{ 
         assert(_onlyOwner(msg.caller));
-        let accountId = _accountId(_account.owner, _account.subaccount);
-        switch(Trie.get(ck_keepers, keyb(accountId), Blob.equal)){
-            case(?(keeper)){
-                ck_keepers := Trie.put(ck_keepers, keyb(accountId), Blob.equal, {
-                    name = Option.get(_name, keeper.name); 
-                    url = Option.get(_url, keeper.url); 
-                    account = _account;
-                    status = _status;
-                    balance = keeper.balance;
-                }).0;
-            };
-            case(_){
-                ck_keepers := Trie.put(ck_keepers, keyb(accountId), Blob.equal, {
-                    name = Option.get(_name, ""); 
-                    url = Option.get(_url, ""); 
-                    account = _account;
-                    status = _status;
-                    balance = 0;
-                }).0;
-            };
-        };
-        ignore _putEvent(#config({setting = #setKeeper({account=_account; name=Option.get(_name, ""); url=Option.get(_url, ""); status=_status})}), ?_accountId(owner, null));
+        _putKeeper(_account, _name, _url, _status);
         return true;
     };
 
@@ -3707,17 +3751,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             case(#set(status)){
                 switch(Trie.get(ck_rpcProviders, keyb(accountId), Blob.equal)){
                     case(?(provider)){
-                        ck_rpcProviders := Trie.put(ck_rpcProviders, keyb(accountId), Blob.equal, {
-                            name = provider.name; 
-                            url = provider.url; 
-                            keeper = accountId;
-                            status = status; 
-                            calls = provider.calls; 
-                            errors = provider.errors; 
-                            preHealthCheck = provider.preHealthCheck;
-                            healthCheck = provider.healthCheck;
-                            latestCall = provider.latestCall;
-                        }).0;
+                        _putKeeperRpc(_account, provider.name, provider.url, status);
                     };
                     case(_){};
                 };
@@ -4299,6 +4333,16 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
         
     /** Debug **/
+    public shared(msg) func debug_evm_rpc_call(_providerName: Text, _input: Text) : async Text{
+        assert(_onlyOwner(msg.caller));
+        let res = await* RpcCaller.evmRpcRequest(ckNetworkName, _providerName, _input, 4000, RPC_AGENT_CYCLES);
+        return res;
+    };
+    public shared(msg) func debug_evm_rpc_call_cost(_providerName: Text, _input: Text) : async Nat{
+        assert(_onlyOwner(msg.caller));
+        let res = await* RpcCaller.evmRpcRequestCost(ckNetworkName, _providerName, _input, 4000);
+        return res;
+    };
     public shared(msg) func debug_get_rpc(_offset: Nat) : async (keeper: AccountId, rpcUrl: Text, size: Nat){
         assert(_onlyOwner(msg.caller));
         return _getRpcUrl(_offset);
