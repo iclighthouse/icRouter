@@ -261,6 +261,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     private stable var quoteToken: EthAddress = "";
     private stable var deposits = Trie.empty<AccountId, TxIndex>(); // pending temp
     private stable var balances: Trie.Trie2D<AccountId, EthTokenId, (Account, Wei)> = Trie.empty();  //Wei
+    private stable var depositUpdating = Trie.empty<AccountId, Timestamp>(); 
     // Pool Balances: balances: Trie.Trie2D<this, EthTokenId, (Account, Wei)> = Trie.empty();  //Wei
     private stable var feeBalances = Trie.empty<EthTokenId, Wei>(); // Fees account: ckETH or ckERC20 tokens
     private stable var retrievals = Trie.empty<TxIndex, Minter.RetrieveStatus>();  // Persistent storage
@@ -2630,7 +2631,17 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             // Notice: If the third parameter of _fetchBalance() is true, it means that the balance is queried from the latest block, 
             // so the balance may be inaccurate, which may lead to ‘Insufficient Balance’ error in the following ICTC tasks. 
             // In this case, set the ICTC transaction to Done to cancel the operation, and do not blindly resend it.
-            depositAmount := await* _fetchBalance(tokenId, userAddress, true); // Wei  
+            if (_isDepositUpdating(accountId)){
+                return #Err(#GenericError({code = 402; message="402: You have a deposit in process."}));
+            };
+            _putDepositUpdating(accountId);
+            try{
+                depositAmount := await* _fetchBalance(tokenId, userAddress, true); // Wei  
+                _removeDepositUpdating(accountId);
+            }catch(e){
+                _removeDepositUpdating(accountId);
+                return #Err(#GenericError({code = 402; message="402: Error while getting balance."}));
+            };
             if (depositAmount > ckFee.token and depositAmount > _getTokenMinAmount(tokenId) and Option.isNull(_getDepositingTxIndex(accountId))){ 
                 var amount = depositAmount;
                 if (isERC20){
@@ -3006,6 +3017,25 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         }else{
             return true;
+        };
+    };
+    private func _putDepositUpdating(_a: AccountId) : (){
+        depositUpdating := Trie.put(depositUpdating, keyb(_a), Blob.equal, _now()).0;
+        depositUpdating := Trie.filter(depositUpdating, func (a: AccountId, ts: Timestamp): Bool{
+            ts + 48 * 3600 > _now(); // 48 hours
+        });
+    };
+    private func _removeDepositUpdating(_a: AccountId) : (){
+        depositUpdating := Trie.remove(depositUpdating, keyb(_a), Blob.equal).0;
+    };
+    private func _isDepositUpdating(_a: AccountId) : Bool{
+        switch(Trie.get(depositUpdating, keyb(_a), Blob.equal)){
+            case(?ts){
+                return ts + 48 * 3600 > _now(); // 48 hours
+            };
+            case(_){
+                return false;
+            };
         };
     };
 
