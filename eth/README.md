@@ -122,8 +122,8 @@ dfx canister --network ic create icETHMinter --controller __your principal__
 dfx build --network ic icETHMinter
 ```
 - Code: "eth/src/icETHMinter.mo"
-- Module hash: 6284e683754b24617743c8b1d934aac816ff8946131e7db7a5a03ca539bc5c5a
-- Version: 0.9.2
+- Module hash: 64db3ff98e9b2264e4deb64622ba979ab4ce5b0a852955d4afc018ff54cb466e
+- Version: 0.9.3
 - Build arg: {
     "args": "--compacting-gc",
     "gzip" : true

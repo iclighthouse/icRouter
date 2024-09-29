@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.2"; /*config*/
+    private let version_: Text = "0.9.3"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -3680,19 +3680,19 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         for (providerName in providers.vals()){
             if (providerName == "Alchemy"){
-                let account = {owner = Principal.fromActor(this); subaccount = ?[1: Nat8]};
+                let account = {owner = Principal.fromActor(this); subaccount = ?[10: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_Alchemy", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_Alchemy", "#Alchemy", #Available);
             }else if (providerName == "BlockPi"){
-                let account = {owner = Principal.fromActor(this); subaccount = ?[2: Nat8]};
+                let account = {owner = Principal.fromActor(this); subaccount = ?[11: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_BlockPi", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_BlockPi", "#BlockPi", #Available);
             }else if (providerName == "PublicNode"){
-                let account = {owner = Principal.fromActor(this); subaccount = ?[3: Nat8]};
+                let account = {owner = Principal.fromActor(this); subaccount = ?[12: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_PublicNode", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_PublicNode", "#PublicNode", #Available);
             }else if (providerName == "Ankr"){
-                let account = {owner = Principal.fromActor(this); subaccount = ?[4: Nat8]};
+                let account = {owner = Principal.fromActor(this); subaccount = ?[13: Nat8]};
                 _putKeeper(account, ?"Dfinity:EVM_RPC_Ankr", null, #Normal);
                 _putKeeperRpc(account, "EVM_RPC_Ankr", "#Ankr", #Available);
             };
