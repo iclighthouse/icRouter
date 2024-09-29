@@ -218,7 +218,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let RPC_AGENT_CYCLES : Cycles = 800_000_000;
     let INIT_CKTOKEN_CYCLES: Cycles = 1000000000000; // 1T
     let ICTC_RUN_INTERVAL : Nat = 10;
-    let MIN_VISIT_INTERVAL : Nat = 6; //seconds
+    let MIN_VISIT_INTERVAL : Nat = 10; //seconds
     // let GAS_PER_BYTE : Nat = 68; // gas
     let MAX_PENDING_RETRIEVALS : Nat = 50; /*config*/
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
