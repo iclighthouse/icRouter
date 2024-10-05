@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.3"; /*config*/
+    private let version_: Text = "0.9.4"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -2616,7 +2616,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let tokenId = _toLower(Option.get(_token, eth_));
         let isERC20 = tokenId != eth_;
         if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
-            let _gasPrice = await* _fetchGasPrice();
+            ignore await* _fetchGasPrice();
         };
         let networkFee = _getEthGas(eth_); // for ETH
         let gasFee = _getEthGas(tokenId); // for ETH or ERC20
@@ -2672,6 +2672,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
     };
     
+    // For debugging purposes, have all accounts that may have deposits perform balance updates
     private func _updateBalance(_aid: ?AccountId): async* (){ 
         switch(_aid){
             case(?aid){
@@ -2878,7 +2879,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             };
         };
     };
-    private func _method2TxnNotify(_account: Account, _txHash: TxHash) : async* (){
+    private func _method2TxnNotify(_account: Account, _txHash: TxHash) : Nat{
         let accountId = _accountId(_account.owner, _account.subaccount);
         let txHashBlob = Blob.fromArray(Option.get(ABI.fromHex(_txHash), []));
         let saga = _getSaga();
@@ -2888,8 +2889,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         let _ttid_1 = saga.push(toid, task_1, ?comp_1, null);
         saga.close(toid);
         _putToidToPendingDepositTxn(_txHash, ?toid);
-        // await* _ictcSagaRun(toid, false);
-        let _f = _getSaga().run(toid);
+        return toid;
     };
     
     private func _depositingMsg(_txHash: TxHash, _account: Account) : [Nat8]{
@@ -3142,7 +3142,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             _putPendingDepositTxn(_account, txHash, _signature, null);
             _putDepositTxn(_account, txHash, _signature, #Pending, null, null);
             let blockIndex = _putEvent(#claimDeposit({account = _account; txHash = txHash; signature = ABI.toHex(_signature)}), ?accountId);
-            await* _method2TxnNotify(_account, txHash);
+            let toid = _method2TxnNotify(_account, txHash);
+            let _f = _getSaga().run(toid);
             return #Ok(blockIndex);
         };
     };
@@ -3189,7 +3190,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         };
         let tokenId = _toLower(Option.get(_token, eth_));
         if (_now() > lastGetGasPriceTime + getGasPriceIntervalSeconds){
-            let _gasPrice = await* _fetchGasPrice();
+            ignore await* _fetchGasPrice();
         };
         let gasFee = _getEthGas(tokenId); // for ETH or ERC20
         let ckFee = _getCkFee(tokenId); // {eth; token} Wei 
@@ -3662,7 +3663,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public shared(msg) func setMinConfirmations(_minConfirmations: Nat) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         minConfirmations := Nat.max(_minConfirmations, 5);
-        ignore _putEvent(#config({setting = #minConfirmations(_minConfirmations)}), ?_accountId(owner, null));
+        ignore _putEvent(#config({setting = #minConfirmations(minConfirmations)}), ?_accountId(owner, null));
         return true;
     };
 
@@ -3670,13 +3671,14 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     public shared(msg) func setMinRpcConfirmations(_minConfirmations: Nat) : async Bool{ 
         assert(_onlyOwner(msg.caller));
         minRpcConfirmations := Nat.max(_minConfirmations, 1);
-        ignore _putEvent(#config({setting = #minRpcConfirmations(_minConfirmations)}), ?_accountId(owner, null));
+        ignore _putEvent(#config({setting = #minRpcConfirmations(minRpcConfirmations)}), ?_accountId(owner, null));
         return true;
     };
 
     /// Sets the deposit method when Minting.
     public shared(msg) func setDepositMethod(_depositMethod: Nat8) : async Bool{ 
         assert(_onlyOwner(msg.caller));
+        assert(_depositMethod >= 1 and _depositMethod <= 3);
         depositMethod := _depositMethod;
         ignore _putEvent(#config({setting = #depositMethod(_depositMethod)}), ?_accountId(owner, null));
         return true;
@@ -3839,6 +3841,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     };
 
     /// Rebuilds a transaction (Create a new ICTC transaction order).   
+    /// Ignore the original transaction and create a new ICTC transaction (new toid).   
     /// WARNING: (1) Ensure that previous transactions have failed before rebuilding the transaction. (2) If you want to reset 
     /// the nonce, you need to make sure that the original nonce is used by another transaction, such as a blank transaction.
     public shared(msg) func rebuildAndResend(_txi: TxIndex, _nonce: {#Remain; #Reset: {spentTxHash: TxHash}}, _refetchGasPrice: Bool, _amountSub: Wei, _autoAdjust: Bool) : async ?BlockHeight{
@@ -3865,7 +3868,8 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         return await* _coverTx(_txi, _resetNonce, ?_refetchGasPrice, _amountSub, _autoAdjust, not(_resetNonce));
     };
 
-    /// Rebuilds the transaction on the original task (Add compensation tasks to the original ICTC transaction order).
+    /// Rebuilds the transaction on the original task (Add compensation tasks to the original ICTC transaction order).  
+    /// Creates tasks in the same ICTC transaction order (original toid), i.e. modifies the original transaction.
     public shared(msg) func rebuildAndContinue(_txi: TxIndex, _toid: SagaTM.Toid, _nonce: {#Remain; #Reset: {spentTxHash: TxHash}}) : async ?BlockHeight{
         assert(_onlyOwner(msg.caller));
         var _resetNonce : Bool = false;

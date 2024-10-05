@@ -450,6 +450,7 @@ func rebuildAndResend(_txi : TxIndex, _nonce : {#Remain; #Reset : { spentTxHash 
 ```
 
 Rebuilds a transaction (Create a new ICTC transaction order).   
+Ignore the original transaction and create a new ICTC transaction (new toid).   
 WARNING: (1) Ensure that previous transactions have failed before rebuilding the transaction. (2) If you want to reset 
 the nonce, you need to make sure that the original nonce is used by another transaction, such as a blank transaction.
 
@@ -458,7 +459,8 @@ the nonce, you need to make sure that the original nonce is used by another tran
 func rebuildAndContinue(_txi : TxIndex, _toid : SagaTM.Toid, _nonce : {#Remain; #Reset : { spentTxHash : TxHash }}) : async ?BlockHeight
 ```
 
-Rebuilds the transaction on the original task (Add compensation tasks to the original ICTC transaction order).
+Rebuilds the transaction on the original task (Add compensation tasks to the original ICTC transaction order).  
+Creates tasks in the same ICTC transaction order (original toid), i.e. modifies the original transaction.
 
 ## Function `resetNonce`
 ``` motoko no-repl
