@@ -166,6 +166,13 @@ func get_ck_tokens() : async [Minter.TokenInfo]
 
 Returns icBTC token information
 
+## Function `capacity`
+``` motoko no-repl
+func capacity() : async { memorySize : Nat; accountAddressesSize : Nat; accountUtxosSize : Nat; depositUpdatingSize : Nat; latestVisitTimeSize : Nat; retrieveBTCSize : Nat; sendingBTCSize : Nat; kytAccountAddressesSize : Nat; kytAddressAccountsSize : Nat; kytTxAccountsSize : Nat; icEventsSize : Nat; icAccountEventsSize : Nat; cyclesMonitorSize : Nat }
+```
+
+Returns the capacity of the canister and stable mapping variables.
+
 ## Function `getOwner`
 ``` motoko no-repl
 func getOwner() : async Principal

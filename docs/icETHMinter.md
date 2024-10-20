@@ -298,6 +298,13 @@ func get_rpc_request_temps() : async [(RpcRequestId, (confirmationStats : [([Val
 
 Returns the RPC request in the process of forming a consensus.
 
+## Function `capacity`
+``` motoko no-repl
+func capacity() : async { memorySize : Nat; latestVisitTimeSize : Nat; accountsSize : Nat; tokensSize : Nat; depositsSize : Nat; balancesSize : Nat; depositUpdatingSize : Nat; feeBalancesSize : Nat; retrievalsSize : Nat; withdrawalsSize : Nat; pendingRetrievalsSize : Nat; transactionsSize : Nat; depositTxnsSize : Nat; pendingDepositTxnsSize : Nat; failedTxnsSize : Nat; ckKeepersSize : Nat; ckRpcProvidersSize : Nat; ckRpcLogsSize : Nat; ckRpcRequestsSize : Nat; ckRpcRequestConsensusTempsSize : Nat; kytAccountAddressesSize : Nat; kytAddressAccountsSize : Nat; kytTxAccountsSize : Nat; blockEventsSize : Nat; accountEventsSize : Nat; cyclesMonitorSize : Nat }
+```
+
+Returns the capacity of the canister and stable mapping variables.
+
 ## Function `keeper_set_rpc`
 ``` motoko no-repl
 func keeper_set_rpc(_act : {#remove; #put : (name : Text, url : Text, status : {#Available; #Unavailable})}, _sa : ?Sa) : async Bool

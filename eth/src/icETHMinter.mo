@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.4"; /*config*/
+    private let version_: Text = "0.9.5"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -3530,6 +3530,65 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
             func (k: RpcRequestId, v: ([([Value], Nat)], Timestamp)): (RpcRequestId, ([([Value], Nat)], Timestamp)){
                 return (k, v);
             });
+    };
+
+    /// Returns the capacity of the canister and stable mapping variables.
+    public query func capacity() : async {
+        memorySize: Nat;
+        latestVisitTimeSize: Nat;
+        accountsSize: Nat;
+        tokensSize: Nat;
+        depositsSize: Nat;
+        balancesSize: Nat;
+        depositUpdatingSize: Nat;
+        feeBalancesSize: Nat;
+        retrievalsSize: Nat;
+        withdrawalsSize: Nat;
+        pendingRetrievalsSize: Nat;
+        transactionsSize: Nat;
+        depositTxnsSize: Nat;
+        pendingDepositTxnsSize: Nat;
+        failedTxnsSize: Nat;
+        ckKeepersSize: Nat;
+        ckRpcProvidersSize: Nat;
+        ckRpcLogsSize: Nat;
+        ckRpcRequestsSize: Nat;
+        ckRpcRequestConsensusTempsSize: Nat;
+        kytAccountAddressesSize: Nat;
+        kytAddressAccountsSize: Nat;
+        kytTxAccountsSize: Nat;
+        blockEventsSize: Nat;
+        accountEventsSize: Nat;
+        cyclesMonitorSize: Nat;
+    }{
+        return {
+            memorySize = Prim.rts_memory_size();
+            latestVisitTimeSize = Trie.size(latestVisitTime);
+            accountsSize = Trie.size(accounts);
+            tokensSize = Trie.size(tokens);
+            depositsSize = Trie.size(deposits);
+            balancesSize = Trie.size(balances);
+            depositUpdatingSize = Trie.size(depositUpdating);
+            feeBalancesSize = Trie.size(feeBalances);
+            retrievalsSize = Trie.size(retrievals);
+            withdrawalsSize = Trie.size(withdrawals);
+            pendingRetrievalsSize = List.size(pendingRetrievals);
+            transactionsSize = Trie.size(transactions);
+            depositTxnsSize = Trie.size(depositTxns);
+            pendingDepositTxnsSize = Trie.size(pendingDepositTxns);
+            failedTxnsSize = List.size(failedTxns.0) + List.size(failedTxns.1);
+            ckKeepersSize = Trie.size(ck_keepers);
+            ckRpcProvidersSize = Trie.size(ck_rpcProviders);
+            ckRpcLogsSize = Trie.size(ck_rpcLogs);
+            ckRpcRequestsSize = Trie.size(ck_rpcRequests);
+            ckRpcRequestConsensusTempsSize = Trie.size(ck_rpcRequestConsensusTemps);
+            kytAccountAddressesSize = Trie.size(kyt_accountAddresses);
+            kytAddressAccountsSize = Trie.size(kyt_addressAccounts);
+            kytTxAccountsSize = Trie.size(kyt_txAccounts);
+            blockEventsSize = Trie.size(blockEvents);
+            accountEventsSize = Trie.size(accountEvents);
+            cyclesMonitorSize = Trie.size(cyclesMonitor);
+        };
     };
 
     /* ===========================
