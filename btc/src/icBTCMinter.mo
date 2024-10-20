@@ -109,6 +109,7 @@ import ICEvents "mo:icl/ICEvents";
 import DRC20 "mo:icl/DRC20";
 import ICTokens "mo:icl/ICTokens";
 import Backup "lib/BackupTypes";
+import Prim "mo:⛔";
 
 /// 
 /// ## Deployment
@@ -181,7 +182,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.3"; /*config*/
+    private let version_: Text = "0.3.4"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private stable var pause: Bool = false;
@@ -213,6 +214,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     private stable var accountAddresses = Trie.empty<AccountId, ([Nat8], Text)>(); 
     private stable var lastFetchUtxosTime : Time.Time = 0;
     private stable var accountUtxos = Trie.empty<Address, (PubKey, DerivationPath, [Utxo])>(); 
+    private stable var depositUpdating = Trie.empty<AccountId, Timestamp>(); 
     private stable var latestVisitTime = Trie.empty<Principal, Timestamp>(); 
     private stable var retrieveBTC = Trie.empty<EventBlockHeight, Minter.RetrieveStatus>(); // retrieval Events
     private stable var sendingBTC = Trie.empty<TxIndex, Minter.SendingBtcStatus>(); // ck txns
@@ -1188,6 +1190,26 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
     };
 
+    private func _putDepositUpdating(_a: AccountId) : (){
+        depositUpdating := Trie.put(depositUpdating, keyb(_a), Blob.equal, _now()).0;
+        depositUpdating := Trie.filter(depositUpdating, func (a: AccountId, ts: Timestamp): Bool{
+            ts + 48 * 3600 > _now(); // 48 hours
+        });
+    };
+    private func _removeDepositUpdating(_a: AccountId) : (){
+        depositUpdating := Trie.remove(depositUpdating, keyb(_a), Blob.equal).0;
+    };
+    private func _isDepositUpdating(_a: AccountId) : Bool{
+        switch(Trie.get(depositUpdating, keyb(_a), Blob.equal)){
+            case(?ts){
+                return ts + 48 * 3600 > _now(); // 48 hours
+            };
+            case(_){
+                return false;
+            };
+        };
+    };
+
     // Check the balances of icBTCMinter and deal with exceptions.
     private func _reconciliation() : async* (){
         // nativeBalance >= minterBalance
@@ -1250,15 +1272,21 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         _setLatestVisitTime(msg.caller);
         var amount : Nat64 = 0;
         var utxos : [Utxo] = [];
+        if (_isDepositUpdating(accountId)){
+            return #Err(#GenericError({error_code = 400; error_message="400: You have a request in process."}));
+        };
+        _putDepositUpdating(accountId);
         try {
             countAsyncMessage += 2;
             let res = await* _fetchAccountUtxos(?account);
             ownAddress := res.0;
             amount := res.1;
             utxos := res.2;
+            _removeDepositUpdating(accountId);
             _putAddressAccount(ownAddress, account);
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
         }catch(e){
+            _removeDepositUpdating(accountId);
             countAsyncMessage -= Nat.min(2, countAsyncMessage);
             return #Err(#TemporarilyUnavailable(Error.message(e)))
         };
@@ -1584,6 +1612,39 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             dexPair = ckDexPair; 
             dexPrice = null; // 1 (Stashi) XXX = ? (Wei) USDT
         }];
+    };
+
+    /// Returns the capacity of the canister and stable mapping variables.
+    public query func capacity() : async {
+        memorySize: Nat;
+        accountAddressesSize: Nat;
+        accountUtxosSize: Nat;
+        depositUpdatingSize: Nat;
+        latestVisitTimeSize: Nat;
+        retrieveBTCSize: Nat;
+        sendingBTCSize: Nat;
+        kytAccountAddressesSize: Nat;
+        kytAddressAccountsSize: Nat;
+        kytTxAccountsSize: Nat;
+        icEventsSize: Nat;
+        icAccountEventsSize: Nat;
+        cyclesMonitorSize: Nat;
+    }{
+        return {
+            memorySize = Prim.rts_memory_size();
+            accountAddressesSize = Trie.size(accountAddresses);
+            accountUtxosSize = Trie.size(accountUtxos);
+            depositUpdatingSize = Trie.size(depositUpdating);
+            latestVisitTimeSize = Trie.size(latestVisitTime);
+            retrieveBTCSize = Trie.size(retrieveBTC);
+            sendingBTCSize = Trie.size(sendingBTC);
+            kytAccountAddressesSize = Trie.size(kyt_accountAddresses);
+            kytAddressAccountsSize = Trie.size(kyt_addressAccounts);
+            kytTxAccountsSize = Trie.size(kyt_txAccounts);
+            icEventsSize = Trie.size(icEvents);
+            icAccountEventsSize = Trie.size(icAccountEvents);
+            cyclesMonitorSize = Trie.size(cyclesMonitor);
+        };
     };
 
     /* ===========================
