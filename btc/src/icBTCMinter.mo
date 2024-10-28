@@ -182,7 +182,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.4"; /*config*/
+    private let version_: Text = "0.3.5"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private stable var pause: Bool = false;
@@ -625,7 +625,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(args)), [], 0, null, null);
         let _ttid = saga.push(toid, task, null, null);
-        saga.close(toid);
         ignore _putEvent(#mint({toid = ?toid; account = account; address = userAddress; icTokenCanisterId = ckTokenCanisterId; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
@@ -655,7 +654,6 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         };
         let task = _buildTask(null, ckTokenCanisterId, #ICRC1(#icrc1_transfer(burnArgs)), [], 0, null, null);
         let _ttid = saga.push(toid, task, null, null);
-        saga.close(toid);
         ignore _putEvent(#burn({toid = ?toid; account = account; address = address; icTokenCanisterId = ckTokenCanisterId; tokenBlockIndex = 0; amount = Nat64.toNat(amount)}), ?accountId);
         return toid;
     };
@@ -1302,6 +1300,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             if (fixedFee > 0){
                 ignore _mintIcToken(?toid, feetoAccount, "", fixedFee, ?"mint_fee");
             };
+            saga.close(toid);
             totalBtcFee += fixedFee;
             totalBtcReceiving += value;
             // record event
@@ -1415,6 +1414,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
                 _addFeeBalance(fee);
                 let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
                 let toid = _mintIcToken(null, feetoAccount, "", fee, ?"mint_fee");
+                _getSaga().close(toid);
                 // record event
                 let event : Minter.Event = #accepted_retrieve_btc_request({
                     txi = thisTxIndex;
@@ -1721,7 +1721,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply += value;
             ckFeetoBalance += value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _mintIcToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
+            let toid = _mintIcToken(null, feetoAccount, "", Nat64.fromNat(value), ?"mint_rebalance");
+            _getSaga().close(toid);
         }else if (ckTotalSupply > nativeBalance){
             var value = Nat.sub(ckTotalSupply, nativeBalance);
             if (value > ckFeetoBalance){ 
@@ -1731,7 +1732,8 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             ckTotalSupply -= value;
             ckFeetoBalance -= value;
             let feetoAccount = {owner = Principal.fromActor(this); subaccount = ?sa_one };
-            ignore _burnCkToken(null, Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount, ?"burn_rebalance");
+            let toid = _burnCkToken(null, Blob.fromArray(sa_one), "", Nat64.fromNat(value), feetoAccount, ?"burn_rebalance");
+            _getSaga().close(toid);
         };
         feeBalance := Nat64.fromNat(ckFeetoBalance);
         let postBalance = {nativeBalance = nativeBalance; totalSupply = ckTotalSupply; minterBalance = minterBalance; feeBalance = ckFeetoBalance};
