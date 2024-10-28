@@ -182,7 +182,7 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
     let SEND_TXN_INTERVAL : Nat = 600; //seconds
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.3.5"; /*config*/
+    private let version_: Text = "0.3.6"; /*config*/
     private let ns_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 100_000_000_000; // 0.1 T
     private stable var pause: Bool = false;
@@ -700,10 +700,10 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
         }catch(e){
             countAsyncMessage -= Nat.min(2, countAsyncMessage); 
         };
-        if (fees.size() > 39) {
-            return fees[39];
+        if (fees.size() > 39) { // 39-th percentile fee. Details: https://internetcomputer.org/docs/current/developer-docs/multi-chain/bitcoin/using-btc/read-state#reading-the-fee-percentile
+            return Nat64.max(fees[39], 3000); // min: 3 satoshi/B
         }else{
-            return 5000;
+            return 3000;
         };
     };
 
@@ -1011,11 +1011,13 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             // Sign the transaction. In this case, we only care about the size of the signed transaction, so we use a mock signer here for efficiency.
             let signedTxnBytes = _signTxTest(transaction, spendUtxos);
             let signedTxnLen : Nat = signedTxnBytes.size();
-            if((signedTxnLen * feePerByte) / 1000 == totalFee) {
+            let minFee: Nat = spendUtxos.size() * 60 * feePerByte / 1000; // Calculate the lowest fee according to the number of inputs
+            let fee: Nat = Nat.max(signedTxnLen * feePerByte / 1000, minFee);
+            if(fee == totalFee) { 
                 Debug.print("Transaction built with fee " # debug_show(totalFee));
                 return (transaction.toBytes(), totalFee);
             } else {
-                totalFee := (signedTxnLen * feePerByte) / 1000;
+                totalFee := fee;
             }
         };
     };
@@ -1758,6 +1760,14 @@ shared(installMsg) actor class icBTCMinter(initArgs: Minter.InitArgs, enDebug: B
             network = NETWORK;
             filter = ?#MinConfirmations(MIN_CONFIRMATIONS); 
         });
+    };
+
+    /// For debugging.
+    public shared(msg) func debug_get_btc_fee(): async [Nat64]{
+        assert(_onlyOwner(msg.caller));
+        Cycles.add<system>(GET_CURRENT_FEE_PERCENTILES_COST_CYCLES);
+        let fees = await ICBTC.get_current_fee_percentiles(NETWORK);
+        return fees;
     };
 
     /// For debugging.
