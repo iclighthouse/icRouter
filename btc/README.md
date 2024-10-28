@@ -91,8 +91,8 @@ dfx canister --network ic create icBTCMinter --controller __your principal__
 dfx build --network ic icBTCMinter
 ```
 - Code: "btc/src/icBTCMinter.mo"
-- Module hash: 76956b53801aac54bf4faf40c360157c9bfeec50dc37ae95e957b8f1731c405f
-- Version: 0.3.4
+- Module hash: d20ae1ce26256044e8ef481a658862be0db91caa4cfe7bc5f1601a8ded8c7bcb
+- Version: 0.3.5
 - Build arg: {
     "args": "--compacting-gc",
     "gzip" : true
