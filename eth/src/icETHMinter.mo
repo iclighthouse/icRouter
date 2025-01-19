@@ -224,7 +224,7 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
     let VALID_BLOCKS_FOR_CLAIMING_TXN: Nat = 432000; // 60 days
     
     private stable var app_debug : Bool = enDebug; // Cannot be modified
-    private let version_: Text = "0.9.5"; /*config*/
+    private let version_: Text = "0.9.6"; /*config*/
     private let ns_: Nat = 1000000000;
     private let gwei_: Nat = 1000000000;
     private let minCyclesBalance: Nat = 200_000_000_000; // 0.2 T
@@ -4596,6 +4596,29 @@ shared(installMsg) actor class icETHMinter(initNetworkName: Text, initSymbol: Te
         assert(_onlyOwner(msg.caller));
         lastUpdateTokenPriceTime := 0;
         await* _updateTokenEthRatio();
+    };
+    public shared(msg) func debug_feeSwappingBalance(_tokenId: EthAddress) : async Wei{
+        assert(_onlyOwner(msg.caller));
+        let tokenInfo = _getCkTokenInfo(_toLower(_tokenId));
+        let icrc1: ICRC1.Self = actor(Principal.toText(tokenInfo.ckLedgerId));
+        return await icrc1.icrc1_balance_of({owner = Principal.fromActor(this); subaccount = _toSaBlob(?sa_two)});
+    };
+    public shared(msg) func debug_cancelAndFallback(_tokenId: EthAddress): async (){
+        assert(_onlyOwner(msg.caller));
+        let tokenInfo = _getCkTokenInfo(_toLower(_tokenId));
+        switch(tokenInfo.dexPair){
+            case(?pairCid){
+                let pair : ICDex.Self = actor(Principal.toText(pairCid));
+                await pair.cancelAll(#self_sa(?sa_two), null);
+                let nonce = (await pair.getTxAccount(Tools.principalToAccountHex(Principal.fromActor(this), ?sa_two))).2;
+                for (i in Iter.range(Nat.sub(Nat.max(nonce,3), 3), nonce)){
+                    ignore await pair.fallback(i, ?sa_two);
+                };
+            };
+            case(_){
+                throw Error.reject("The DEX pair canister-id is empty.");
+            };
+        };
     };
     public shared(msg) func debug_convertFees(): async (){
         assert(_onlyOwner(msg.caller));
